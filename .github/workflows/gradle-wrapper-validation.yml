@@ -1,10 +1,18 @@
 name: "Validate Gradle Wrapper"
 on: [pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   validation:
     name: "Gradle wrapper validation"
     runs-on: ubuntu-latest
     steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - uses: actions/checkout@v5
-      - uses: gradle/wrapper-validation-action@v3
+      - uses: gradle/wrapper-validation-action@f9c9c575b8b21b6485636a91ffecd10e558c62f6 # v3.5.0
