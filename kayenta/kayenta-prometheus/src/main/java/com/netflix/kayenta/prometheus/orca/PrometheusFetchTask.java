@@ -56,14 +56,14 @@ public class PrometheusFetchTask implements RetryableTask {
   public long getBackoffPeriod() {
     // TODO(duftler): Externalize this configuration.
     // TODO(ewiseblatt): Copied from stackdriver.
-    return Duration.ofSeconds(2).toMillis();
+    return Duration.ofSeconds(10).toMillis();
   }
 
   @Override
   public long getTimeout() {
     // TODO(duftler): Externalize this configuration.
     // TODO(ewiseblatt): Copied from stackdriver.
-    return Duration.ofMinutes(2).toMillis();
+    return Duration.ofMinutes(5).toMillis();
   }
 
   @Nonnull
