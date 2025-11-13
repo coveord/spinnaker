@@ -44,11 +44,11 @@ jobs:
       - uses: ./.github/actions/generic-build-publish
         with:
           project: deck-kayenta
-          publish: ${{ github.event_name != 'pull_request' }}
-          publish-containers: false
-          publish-debs: false
-          publish-halconfig: false
-          publish-npm: ${{ github.event_name == 'push' || inputs.publish-npm == true }}
+          publish: 'false'
+          publish-containers: 'false'
+          publish-debs: 'false'
+          publish-halconfig: 'false'
+          publish-npm: 'false'
           version-override: ${{ inputs.version-override }}
           integration-test: false
           github-token: ${{ secrets.GITHUB_TOKEN }}

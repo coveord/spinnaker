@@ -62,10 +62,11 @@ jobs:
         with:
           project: deck
           docker-build-command: ':deck:webpack'
-          publish: ${{ github.event_name != 'pull_request' }}
-          publish-containers: ${{ github.event_name == 'push' || inputs.publish-containers == true }}
-          publish-debs: ${{ inputs.publish-debs == true }}
-          publish-npm: ${{ github.event_name == 'push' || inputs.publish-npm == true }}
+          publish: 'false'
+          publish-containers: 'false'
+          publish-debs: 'false'
+          publish-halconfig: 'false'
+          publish-npm: 'false'
           version-override: ${{ inputs.version-override }}
           integration-test: false
           github-token: ${{ secrets.GITHUB_TOKEN }}

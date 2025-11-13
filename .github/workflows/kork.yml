@@ -20,6 +20,10 @@ jobs:
       - uses: ./.github/actions/generic-build-publish
         with:
           project: kork
-          publish: false
+          publish: 'false'
+          publish-containers: 'false'
+          publish-debs: 'false'
+          publish-halconfig: 'false'
+          publish-npm: 'false'
           integration-test: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
