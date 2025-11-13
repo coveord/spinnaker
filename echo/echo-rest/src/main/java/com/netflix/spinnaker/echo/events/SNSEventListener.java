@@ -6,6 +6,7 @@ import com.netflix.spinnaker.echo.api.events.Event;
 import com.netflix.spinnaker.echo.api.events.EventListener;
 import com.netflix.spinnaker.echo.config.SNSProperties;
 import com.netflix.spinnaker.echo.jackson.EchoObjectMapper;
+import java.util.Objects;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.DisposableBean;
@@ -31,12 +32,12 @@ class SNSEventListener implements EventListener, DisposableBean {
   private final AmazonSNSExtendedClient snsExtendedClient;
 
   private final String topicArn;
-  private final Boolean logFullEvents;
+  private final boolean logFullEvents;
   private final Registry registry;
 
   public SNSEventListener(SNSProperties snsProperties, Registry registry) {
-    this.topicArn = snsProperties.getTopicArn();
-    String bucketName = snsProperties.getBucketName();
+    this.topicArn = Objects.requireNonNull(snsProperties.getTopicArn());
+    String bucketName = Objects.requireNonNull(snsProperties.getBucketName());
     this.logFullEvents = snsProperties.isLogFullEvents();
     this.registry = registry;
 
@@ -53,7 +54,7 @@ class SNSEventListener implements EventListener, DisposableBean {
           this.snsExtendedClient.publish(
               PublishRequest.builder().topicArn(topicArn).message(message).build());
       log.debug("Message {} published", result.messageId());
-      if (this.logFullEvents) {
+      if (logFullEvents) {
         log.info(message);
       }
     } catch (SnsException e) {
