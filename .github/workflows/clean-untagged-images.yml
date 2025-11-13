@@ -6,13 +6,21 @@ on:
     - cron: '0 0 */1 * *' # runs daily
   workflow_dispatch: # allows for manual invocation
 
+permissions:
+  contents: read
+
 jobs:
   ghcr-cleaner:
     runs-on: 'ubuntu-latest'
     steps:
       # configure based on your registry
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: Login to GHCR
-        uses: docker/login-action@v3 # Use the latest stable version
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -20,7 +28,7 @@ jobs:
 
       # delete untaggd images older than 48 hours
       - name: Clean images
-        uses: 'docker://us-docker.pkg.dev/gcr-cleaner/gcr-cleaner/gcr-cleaner-cli'
+        uses: 'docker://us-docker.pkg.dev/gcr-cleaner/gcr-cleaner/gcr-cleaner-cli:latest@sha256:c8e6579e30e1fd6ab3240f4f29b9615a6a751fc273ef724ab20f8d4fa4cc0b9b'
         with:
           args: >-
             -repo=ghcr.io/spinnaker/clouddriver
@@ -42,8 +50,13 @@ jobs:
     runs-on: 'ubuntu-latest'
     steps:
       # configure based on your registry
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
       - name: Login to GAR
-        uses: 'docker/login-action@v3'
+        uses: 'docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef' # v3.6.0
         with:
           registry: us-docker.pkg.dev
           username: _json_key
@@ -51,7 +64,7 @@ jobs:
 
 
       # delete untaggd images older than 48 hours
-      - uses: 'docker://us-docker.pkg.dev/gcr-cleaner/gcr-cleaner/gcr-cleaner-cli'
+      - uses: 'docker://us-docker.pkg.dev/gcr-cleaner/gcr-cleaner/gcr-cleaner-cli:latest@sha256:c8e6579e30e1fd6ab3240f4f29b9615a6a751fc273ef724ab20f8d4fa4cc0b9b'
         with:
           args: >-
             -repo=us-docker.pkg.dev/spinnaker-community/docker

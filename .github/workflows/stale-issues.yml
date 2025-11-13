@@ -10,6 +10,11 @@ jobs:
     if: startsWith(github.repository, 'spinnaker/')
     runs-on: ubuntu-latest
     steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+      with:
+        egress-policy: audit
+
     - name: stale
       # github release 0.1.0
       uses: gatsbyjs/stale@c201d45ef4b0ccbd3bb0616f93bae13e73d0a080
