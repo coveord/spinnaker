@@ -28,5 +28,6 @@ export interface IOrchestratedItem extends ITimedItem {
   isCanceled: boolean;
   isSuspended: boolean;
   isPaused: boolean;
+  isHalted: boolean;
   runningTime: string;
 }
