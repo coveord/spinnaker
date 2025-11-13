@@ -6,11 +6,9 @@ import com.netflix.spinnaker.echo.api.events.Event;
 import com.netflix.spinnaker.echo.api.events.EventListener;
 import com.netflix.spinnaker.echo.config.SNSProperties;
 import com.netflix.spinnaker.echo.jackson.EchoObjectMapper;
-import lombok.Getter;
-import lombok.Setter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.DisposableBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import software.amazon.awssdk.services.s3.S3Client;
@@ -23,35 +21,28 @@ import software.amazon.sns.SNSExtendedClientConfiguration;
 
 @Component
 @ConditionalOnProperty("sns.enabled")
-@Getter
-@Setter
-class SNSEventListener implements EventListener {
+class SNSEventListener implements EventListener, DisposableBean {
   private static final Logger log = LoggerFactory.getLogger(SNSEventListener.class);
 
-  private ObjectMapper mapper = EchoObjectMapper.getInstance();
+  private final ObjectMapper mapper = EchoObjectMapper.getInstance();
 
   private final SnsClient snsClient = SnsClient.builder().build();
   private final S3Client s3Client = S3Client.builder().build();
-  private final SNSExtendedClientConfiguration snsExtendedClientConfiguration;
   private final AmazonSNSExtendedClient snsExtendedClient;
 
-  private final Boolean enabled;
   private final String topicArn;
-  private final String bucketName;
   private final Boolean logFullEvents;
   private final Registry registry;
 
-  @Autowired
-  SNSEventListener(SNSProperties snsProperties, Registry registry) {
-    this.enabled = snsProperties.getEnabled();
+  public SNSEventListener(SNSProperties snsProperties, Registry registry) {
     this.topicArn = snsProperties.getTopicArn();
-    this.bucketName = snsProperties.getBucketName();
-    this.logFullEvents = snsProperties.getLogFullEvents();
+    String bucketName = snsProperties.getBucketName();
+    this.logFullEvents = snsProperties.isLogFullEvents();
     this.registry = registry;
 
-    this.snsExtendedClientConfiguration =
+    SNSExtendedClientConfiguration snsExtendedClientConfiguration =
         new SNSExtendedClientConfiguration()
-            .withPayloadSupportEnabled(s3Client, this.bucketName)
+            .withPayloadSupportEnabled(s3Client, bucketName)
             .withAlwaysThroughS3(true);
     this.snsExtendedClient = new AmazonSNSExtendedClient(snsClient, snsExtendedClientConfiguration);
   }
@@ -79,5 +70,12 @@ class SNSEventListener implements EventListener {
     } catch (Exception e) {
       log.error("Failed to serialize event", e);
     }
+  }
+
+  @Override
+  public void destroy() throws Exception {
+    this.snsExtendedClient.close();
+    this.snsClient.close();
+    this.s3Client.close();
   }
 }

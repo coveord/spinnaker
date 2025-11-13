@@ -10,8 +10,7 @@ import org.springframework.validation.annotation.Validated;
 @Validated
 @Data
 public class SNSProperties {
-  Boolean enabled;
-  String topicArn;
-  String bucketName;
-  Boolean logFullEvents = false;
+  private String topicArn;
+  private String bucketName;
+  private boolean logFullEvents = false;
 }
