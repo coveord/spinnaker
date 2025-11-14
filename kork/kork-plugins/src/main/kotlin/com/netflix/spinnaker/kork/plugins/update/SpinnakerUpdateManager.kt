@@ -164,6 +164,7 @@ class SpinnakerUpdateManager(
       val file = this.resolve(pluginId + "-" + downloaded.fileName.toString())
       File(this.toString()).mkdirs()
       try {
+        log.debug("Moving '{}' to '{}'", downloaded, file)
         return Files.move(downloaded, file, StandardCopyOption.REPLACE_EXISTING)
       } catch (e: IOException) {
         throw PluginRuntimeException(e, "Failed to write file '{}' to plugins folder", file)
