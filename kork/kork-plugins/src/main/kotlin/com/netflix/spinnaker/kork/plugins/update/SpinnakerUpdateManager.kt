@@ -27,6 +27,7 @@ import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import kotlin.io.path.absolute
 import org.pf4j.PluginManager
 import org.pf4j.PluginRuntimeException
 import org.pf4j.update.PluginInfo.PluginRelease
@@ -69,7 +70,10 @@ class SpinnakerUpdateManager(
   private fun PluginInfoRelease.download(): Path? {
     // This is a remote plugin only, do nothing here.
     if (props.url == null && props.remoteExtensions.isNotEmpty()) {
-      log.info("Nothing to download - plugin '{}' is a remote plugin and there is no in-process plugin binary.", pluginId)
+      log.info(
+        "Nothing to download - plugin '{}' is a remote plugin and there is no in-process plugin binary.",
+        pluginId
+      )
       return null
     }
 
@@ -79,7 +83,11 @@ class SpinnakerUpdateManager(
 
       // If a plugin was built without a version specified (via the Plugin-Version MANIFEST.MF
       // attribute), to be safe we always check for the configured plugin version.
-      if (loadedPluginVersion == "unspecified" || pluginManager.versionManager.compareVersions(props.version, loadedPluginVersion) > 0) {
+      if (loadedPluginVersion == "unspecified" || pluginManager.versionManager.compareVersions(
+          props.version,
+          loadedPluginVersion
+        ) > 0
+      ) {
         log.debug(
           "Newer version '{}' of plugin '{}' found, deleting previous version '{}'",
           props.version, pluginId, loadedPluginVersion
@@ -99,6 +107,14 @@ class SpinnakerUpdateManager(
 
     log.debug("Downloading plugin '{}' with version '{}'", pluginId, props.version)
     val tmpPath = downloadPluginRelease(pluginId, props.version)
+    if (!Files.exists(tmpPath)) {
+      throw PluginRuntimeException("Downloaded plugin file does not exist at expected path: '$tmpPath'")
+    }
+    log.debug(
+      "Downloaded plugin to tmp path '{}', copying to plugins directory '{}'",
+      tmpPath,
+      pluginManager.pluginsRoot
+    )
     val downloadedPluginPath = pluginManager.pluginsRoot.write(pluginId, tmpPath)
 
     log.debug("Downloaded plugin '{}'", pluginId)
@@ -164,6 +180,7 @@ class SpinnakerUpdateManager(
       val file = this.resolve(pluginId + "-" + downloaded.fileName.toString())
       File(this.toString()).mkdirs()
       try {
+        log.debug("Moving '{}' to '{}' (absolute: '{}')", downloaded, file, file.absolute())
         return Files.move(downloaded, file, StandardCopyOption.REPLACE_EXISTING)
       } catch (e: IOException) {
         throw PluginRuntimeException(e, "Failed to write file '{}' to plugins folder", file)
