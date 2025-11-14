@@ -99,6 +99,10 @@ class SpinnakerUpdateManager(
 
     log.debug("Downloading plugin '{}' with version '{}'", pluginId, props.version)
     val tmpPath = downloadPluginRelease(pluginId, props.version)
+    if (!Files.exists(tmpPath)) {
+      throw PluginRuntimeException("Downloaded plugin file does not exist at expected path: '$tmpPath'")
+    }
+    log.debug("Downloaded plugin to tmp path '{}', copying to plugins directory...", tmpPath)
     val downloadedPluginPath = pluginManager.pluginsRoot.write(pluginId, tmpPath)
 
     log.debug("Downloaded plugin '{}'", pluginId)
