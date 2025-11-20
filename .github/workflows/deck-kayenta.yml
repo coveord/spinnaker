@@ -24,6 +24,7 @@ on:
   push:
     branches:
       - release-*
+      - "coveo/release-*"
     paths:
       - 'deck-kayenta/**'
       - '.github/workflows/deck-kayenta.yml'
@@ -32,6 +33,7 @@ on:
     branches:
       - main
       - release-*
+      - "coveo/release-*"
     paths:
       - 'deck-kayenta/**'
       - '.github/workflows/deck-kayenta.yml'
