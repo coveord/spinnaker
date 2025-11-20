@@ -225,7 +225,7 @@ dependencies {
 
     api("org.postgresql:postgresql:${versions.postgres}")
     api("com.hubspot.jinjava:jinjava:${versions.jinjava}")
-    api("com.thoughtworks.xstream:xstream:${versions.jinjava}")
+    api("com.thoughtworks.xstream:xstream:${versions.xstream}")
     api("net.minidev:json-smart:${versions.jsonSmart}")
   }
 }
