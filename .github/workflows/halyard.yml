@@ -34,6 +34,7 @@ on:
     branches:
       - main
       - release-*
+      - "coveo/release-*"
     paths:
       - 'halyard/**'
       - 'clouddriver/**'
@@ -46,6 +47,7 @@ on:
     branches:
       - main
       - release-*
+      - "coveo/release-*"
     paths:
       - 'halyard/**'
       - 'clouddriver/**'
@@ -65,7 +67,6 @@ jobs:
           publish: 'false'
           publish-containers: 'false'
           publish-debs: 'false'
-          publish-halconfig: 'false'
           publish-npm: 'false'
           version-override: ${{ inputs.version-override }}
           publish-halconfig: false
