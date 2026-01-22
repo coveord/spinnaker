@@ -31,7 +31,7 @@ runs:
   using: "composite"
   steps:
     - name: Login to Google Cloud
-      uses: google-github-actions/auth@v2
+      uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
       # use service account flow defined at: https://github.com/google-github-actions/upload-cloud-storage#authenticating-via-service-account-key-json
       with:
         credentials_json: ${{ inputs.gar-json-key }}
