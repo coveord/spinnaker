@@ -24,6 +24,8 @@ import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution
 import com.netflix.spinnaker.orca.events.ExecutionComplete
 import com.netflix.spinnaker.orca.events.ExecutionStarted
 import com.netflix.spinnaker.orca.ext.initialStages
+import com.netflix.spinnaker.orca.lock.RetriableLock
+import com.netflix.spinnaker.orca.lock.RetriableLock.RetriableLockOptions
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository
 import com.netflix.spinnaker.orca.q.CancelExecution
 import com.netflix.spinnaker.orca.q.StartExecution
@@ -46,7 +48,8 @@ class StartExecutionHandler(
   override val repository: ExecutionRepository,
   private val pendingExecutionService: PendingExecutionService,
   @Qualifier("queueEventPublisher") private val publisher: ApplicationEventPublisher,
-  private val clock: Clock
+  private val clock: Clock,
+  private val retriableLock: RetriableLock
 ) : OrcaMessageHandler<StartExecution> {
 
   override val messageType = StartExecution::class.java
@@ -56,17 +59,35 @@ class StartExecutionHandler(
   override fun handle(message: StartExecution) {
     message.withExecution { execution ->
       if (execution.status == NOT_STARTED && !execution.isCanceled) {
-        if (execution.shouldQueue()) {
-          execution.pipelineConfigId?.let {
-            log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
-            pendingExecutionService.enqueue(it, message)
+        val configId = execution.pipelineConfigId
+        if (configId != null) {
+          withLocking(configId, message) {
+            if (execution.shouldQueue()) {
+              log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
+              pendingExecutionService.enqueue(configId, message)
+            } else {
+              start(execution)
+            }
           }
         } else {
-          start(execution)
+          if (execution.shouldQueue()) {
+            log.info("Queueing {} {} {} (no pipelineConfigId)", execution.application, execution.name, execution.id)
+          } else {
+            start(execution)
+          }
         }
       } else {
         terminate(execution)
       }
+    }
+  }
+
+  private fun withLocking(lockName: String, message: StartExecution, action: Runnable) {
+    val lockOptions = RetriableLockOptions(lockName)
+    val lockAcquired = retriableLock.lock(lockOptions, action)
+    if (!lockAcquired) {
+      log.warn("Failed to obtain lock for pipelineConfigId: {}. Pushing original message back to queue.", lockName)
+      queue.push(message)
     }
   }
 
