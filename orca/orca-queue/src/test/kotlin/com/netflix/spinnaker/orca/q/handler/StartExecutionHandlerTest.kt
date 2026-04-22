@@ -373,13 +373,8 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       and("the pipeline is allowed to run multiple executions concurrently") {
         beforeGroup {
-          setupRetriableLock(true, retriableLock)
           pipeline.isLimitConcurrent = false
           runningPipeline.isLimitConcurrent = false
-
-          whenever(
-            repository.retrievePipelinesForPipelineConfigId(eq(configId), any())
-          ) doReturn just(runningPipeline)
 
           whenever(
             repository.retrieve(message.executionType, message.executionId)
@@ -392,10 +387,14 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
           subject.handle(message)
         }
 
-        it("starts the new pipeline") {
+        it("starts the new pipeline without locking") {
           assertThat(pipeline.status).isEqualTo(RUNNING)
           verify(repository).updateStatus(pipeline)
           verify(queue).push(isA<StartStage>())
+        }
+
+        it("does not attempt to acquire a lock") {
+          verify(retriableLock, never()).lock(any(), any())
         }
       }
 
@@ -589,6 +588,39 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
         }
       }
 
+    }
+
+    given("a pipeline with a pipelineConfigId but no concurrency limits bypasses locking") {
+      val configId = UUID.randomUUID().toString()
+      val pipeline = pipeline {
+        pipelineConfigId = configId
+        isLimitConcurrent = false
+        maxConcurrentExecutions = 0
+        stage {
+          type = singleTaskStage.type
+        }
+      }
+      val message = StartExecution(pipeline)
+
+      beforeGroup {
+        whenever(repository.retrieve(message.executionType, message.executionId)) doReturn pipeline
+      }
+
+      afterGroup(::resetMocks)
+
+      on("receiving a message") {
+        subject.handle(message)
+      }
+
+      it("starts the pipeline without locking") {
+        assertThat(pipeline.status).isEqualTo(RUNNING)
+        verify(repository).updateStatus(pipeline)
+        verify(queue).push(isA<StartStage>())
+      }
+
+      it("does not attempt to acquire a lock") {
+        verify(retriableLock, never()).lock(any(), any())
+      }
     }
 
     given("a pipeline with a pipelineConfigId when the lock cannot be acquired") {

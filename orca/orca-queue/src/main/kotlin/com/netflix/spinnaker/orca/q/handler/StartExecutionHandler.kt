@@ -60,7 +60,7 @@ class StartExecutionHandler(
     message.withExecution { execution ->
       if (execution.status == NOT_STARTED && !execution.isCanceled) {
         val configId = execution.pipelineConfigId
-        if (configId != null) {
+        if (configId != null && (execution.isLimitConcurrent || execution.maxConcurrentExecutions > 0)) {
           withLocking(configId, message) {
             if (execution.shouldQueue()) {
               log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
@@ -70,11 +70,7 @@ class StartExecutionHandler(
             }
           }
         } else {
-          if (execution.shouldQueue()) {
-            log.info("Queueing {} {} {} (no pipelineConfigId)", execution.application, execution.name, execution.id)
-          } else {
-            start(execution)
-          }
+          start(execution)
         }
       } else {
         terminate(execution)
