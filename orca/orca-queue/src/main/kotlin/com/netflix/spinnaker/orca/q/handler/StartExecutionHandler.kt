@@ -58,24 +58,35 @@ class StartExecutionHandler(
 
   override fun handle(message: StartExecution) {
     message.withExecution { execution ->
-      if (execution.status == NOT_STARTED && !execution.isCanceled) {
-        val configId = execution.pipelineConfigId
-        if (configId != null && (execution.isLimitConcurrent || execution.maxConcurrentExecutions > 0)) {
-          withLocking(configId, message) {
-            if (execution.shouldQueue()) {
-              log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
-              pendingExecutionService.enqueue(configId, message)
-            } else {
-              start(execution)
-            }
-          }
+      if (execution.status != NOT_STARTED || execution.isCanceled) {
+        terminate(execution)
+        return@withExecution
+      }
+
+      if (!shouldLock(execution)) {
+        start(execution)
+        return@withExecution
+      }
+
+      withLocking(execution.pipelineConfigId!!, message) {
+        if (execution.shouldQueue()) {
+          log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
+          pendingExecutionService.enqueue(execution.pipelineConfigId, message)
         } else {
           start(execution)
         }
-      } else {
-        terminate(execution)
       }
     }
+  }
+
+  /**
+   * Locking is only needed when concurrency controls are active — i.e. the pipeline has a
+   * pipelineConfigId AND either limitConcurrent is enabled or maxConcurrentExecutions is set.
+   * Without these, shouldQueue() always returns false so there is no check-then-act to protect.
+   */
+  private fun shouldLock(execution: PipelineExecution): Boolean {
+    return execution.pipelineConfigId != null &&
+      (execution.isLimitConcurrent || execution.maxConcurrentExecutions > 0)
   }
 
   private fun withLocking(lockName: String, message: StartExecution, action: Runnable) {
