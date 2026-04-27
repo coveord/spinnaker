@@ -25,6 +25,7 @@ import com.netflix.spinnaker.orca.api.test.pipeline
 import com.netflix.spinnaker.orca.api.test.stage
 import com.netflix.spinnaker.orca.events.ExecutionComplete
 import com.netflix.spinnaker.orca.events.ExecutionStarted
+import com.netflix.spinnaker.orca.lock.RetriableLock
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository
 import com.netflix.spinnaker.orca.q.CancelExecution
 import com.netflix.spinnaker.orca.q.StartExecution
@@ -66,12 +67,13 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
   val pendingExecutionService: PendingExecutionService = mock()
   val publisher: ApplicationEventPublisher = mock()
   val clock = fixedClock()
+  val retriableLock: RetriableLock = mock()
 
   subject(GROUP) {
-    StartExecutionHandler(queue, repository, pendingExecutionService, publisher, clock)
+    StartExecutionHandler(queue, repository, pendingExecutionService, publisher, clock, retriableLock)
   }
 
-  fun resetMocks() = reset(queue, repository, publisher)
+  fun resetMocks() = reset(queue, repository, publisher, retriableLock, pendingExecutionService)
 
   describe("starting an execution") {
     given("a pipeline with a single initial stage") {
@@ -99,6 +101,10 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       it("starts the first stage") {
         verify(queue).push(StartStage(pipeline.stages.first()))
+      }
+
+      it("does not attempt to acquire a lock (no pipelineConfigId)") {
+        verify(retriableLock, never()).lock(any(), any())
       }
 
       it("publishes an event") {
@@ -331,6 +337,7 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       and("the pipeline should not run multiple executions concurrently") {
         beforeGroup {
+          setupRetriableLock(true, retriableLock)
           pipeline.isLimitConcurrent = true
           runningPipeline.isLimitConcurrent = true
 
@@ -370,10 +377,6 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
           runningPipeline.isLimitConcurrent = false
 
           whenever(
-            repository.retrievePipelinesForPipelineConfigId(eq(configId), any())
-          ) doReturn just(runningPipeline)
-
-          whenever(
             repository.retrieve(message.executionType, message.executionId)
           ) doReturn pipeline
         }
@@ -384,15 +387,20 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
           subject.handle(message)
         }
 
-        it("starts the new pipeline") {
+        it("starts the new pipeline without locking") {
           assertThat(pipeline.status).isEqualTo(RUNNING)
           verify(repository).updateStatus(pipeline)
           verify(queue).push(isA<StartStage>())
+        }
+
+        it("does not attempt to acquire a lock") {
+          verify(retriableLock, never()).lock(any(), any())
         }
       }
 
       and("the pipeline is not allowed to run concurrently but the only pipeline already running is the same one") {
         beforeGroup {
+          setupRetriableLock(true, retriableLock)
           pipeline.isLimitConcurrent = true
           runningPipeline.isLimitConcurrent = true
           pipeline.status = NOT_STARTED
@@ -466,6 +474,7 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       and("the pipeline is allowed to run if no executions are running") {
         beforeGroup {
+          setupRetriableLock(true, retriableLock)
           pipeline.status = NOT_STARTED
 
           whenever(
@@ -492,6 +501,7 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       and("the pipeline is allowed to run if 1 execution is running") {
         beforeGroup {
+          setupRetriableLock(true, retriableLock)
           pipeline.status = NOT_STARTED
 
           whenever(
@@ -518,6 +528,7 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       and("the pipeline is allowed to run if 2 executions are running") {
         beforeGroup {
+          setupRetriableLock(true, retriableLock)
           pipeline.status = NOT_STARTED
 
           whenever(
@@ -544,6 +555,7 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
 
       and("the pipeline should not run if 3 executions are running") {
         beforeGroup {
+          setupRetriableLock(true, retriableLock)
           pipeline.status = NOT_STARTED
 
           whenever(
@@ -576,6 +588,160 @@ object StartExecutionHandlerTest : SubjectSpek<StartExecutionHandler>({
         }
       }
 
+    }
+
+    given("a pipeline with a pipelineConfigId but no concurrency limits bypasses locking") {
+      val configId = UUID.randomUUID().toString()
+      val pipeline = pipeline {
+        pipelineConfigId = configId
+        isLimitConcurrent = false
+        maxConcurrentExecutions = 0
+        stage {
+          type = singleTaskStage.type
+        }
+      }
+      val message = StartExecution(pipeline)
+
+      beforeGroup {
+        whenever(repository.retrieve(message.executionType, message.executionId)) doReturn pipeline
+      }
+
+      afterGroup(::resetMocks)
+
+      on("receiving a message") {
+        subject.handle(message)
+      }
+
+      it("starts the pipeline without locking") {
+        assertThat(pipeline.status).isEqualTo(RUNNING)
+        verify(repository).updateStatus(pipeline)
+        verify(queue).push(isA<StartStage>())
+      }
+
+      it("does not attempt to acquire a lock") {
+        verify(retriableLock, never()).lock(any(), any())
+      }
+    }
+
+    given("a pipeline with a pipelineConfigId when the lock cannot be acquired") {
+      val configId = UUID.randomUUID().toString()
+      val pipeline = pipeline {
+        pipelineConfigId = configId
+        isLimitConcurrent = true
+        stage {
+          type = singleTaskStage.type
+        }
+      }
+      val message = StartExecution(pipeline)
+
+      beforeGroup {
+        setupRetriableLock(false, retriableLock)
+        whenever(repository.retrieve(message.executionType, message.executionId)) doReturn pipeline
+      }
+
+      afterGroup(::resetMocks)
+
+      on("receiving a message") {
+        subject.handle(message)
+      }
+
+      it("does not start the pipeline") {
+        assertThat(pipeline.status).isNotEqualTo(RUNNING)
+        verify(repository, never()).updateStatus(pipeline)
+      }
+
+      it("re-pushes the message to the queue") {
+        verify(queue).push(isA<StartExecution>())
+      }
+
+      it("does not publish any events") {
+        verifyNoMoreInteractions(publisher)
+      }
+    }
+
+    given("a pipeline with a pipelineConfigId acquires lock using the pipelineConfigId as lock name") {
+      val configId = UUID.randomUUID().toString()
+      val pipeline = pipeline {
+        pipelineConfigId = configId
+        isLimitConcurrent = true
+        stage {
+          type = singleTaskStage.type
+        }
+      }
+      val message = StartExecution(pipeline)
+
+      beforeGroup {
+        setupRetriableLock(true, retriableLock)
+        whenever(repository.retrieve(message.executionType, message.executionId)) doReturn pipeline
+        whenever(
+          repository.retrievePipelinesForPipelineConfigId(eq(configId), any())
+        ) doReturn just(pipeline)
+      }
+
+      afterGroup(::resetMocks)
+
+      on("receiving a message") {
+        subject.handle(message)
+      }
+
+      it("acquires the lock using pipelineConfigId as the lock name") {
+        argumentCaptor<RetriableLock.RetriableLockOptions>().apply {
+          verify(retriableLock).lock(capture(), any())
+          assertThat(firstValue.lockName).isEqualTo(configId)
+        }
+      }
+    }
+
+    given("a pipeline with a pipelineConfigId and shouldQueue true enqueues under lock") {
+      val configId = UUID.randomUUID().toString()
+      val runningPipeline = pipeline {
+        pipelineConfigId = configId
+        isLimitConcurrent = true
+        status = RUNNING
+        stage {
+          type = singleTaskStage.type
+          status = RUNNING
+        }
+      }
+      val pipeline = pipeline {
+        pipelineConfigId = configId
+        isLimitConcurrent = true
+        stage {
+          type = singleTaskStage.type
+        }
+      }
+      val message = StartExecution(pipeline.type, pipeline.id, pipeline.application)
+
+      beforeGroup {
+        setupRetriableLock(true, retriableLock)
+
+        whenever(
+          repository.retrievePipelinesForPipelineConfigId(eq(configId), any())
+        ) doReturn just(runningPipeline)
+
+        whenever(
+          repository.retrieve(message.executionType, message.executionId)
+        ) doReturn pipeline
+      }
+
+      afterGroup(::resetMocks)
+
+      on("receiving a message") {
+        subject.handle(message)
+      }
+
+      it("enqueues the execution in the pending queue") {
+        verify(pendingExecutionService).enqueue(eq(configId), any())
+      }
+
+      it("does not start the pipeline") {
+        assertThat(pipeline.status).isNotEqualTo(RUNNING)
+        verify(repository, never()).updateStatus(pipeline)
+      }
+
+      it("does not push any start stage messages") {
+        verify(queue, never()).push(isA<StartStage>())
+      }
     }
   }
 })
