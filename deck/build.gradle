@@ -21,7 +21,9 @@ node {
     yarnVersion = packageJson.engines.yarn.replaceAll(/[^\d\.]/, '')
 
     // Enabled the automatic download. False is the default (for now).
-    download = true
+    // COVEO change: The automatic download gets an x64 version on arm64 which crash, so we set it to false
+    // https://github.com/node-gradle/gradle-node-plugin/issues/154
+    download = false
 }
 
 task modules(type: YarnTask) {
