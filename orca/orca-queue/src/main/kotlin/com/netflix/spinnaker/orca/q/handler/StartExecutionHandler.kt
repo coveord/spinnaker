@@ -24,6 +24,8 @@ import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution
 import com.netflix.spinnaker.orca.events.ExecutionComplete
 import com.netflix.spinnaker.orca.events.ExecutionStarted
 import com.netflix.spinnaker.orca.ext.initialStages
+import com.netflix.spinnaker.orca.lock.RetriableLock
+import com.netflix.spinnaker.orca.lock.RetriableLock.RetriableLockOptions
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository
 import com.netflix.spinnaker.orca.q.CancelExecution
 import com.netflix.spinnaker.orca.q.StartExecution
@@ -46,7 +48,8 @@ class StartExecutionHandler(
   override val repository: ExecutionRepository,
   private val pendingExecutionService: PendingExecutionService,
   @Qualifier("queueEventPublisher") private val publisher: ApplicationEventPublisher,
-  private val clock: Clock
+  private val clock: Clock,
+  private val retriableLock: RetriableLock
 ) : OrcaMessageHandler<StartExecution> {
 
   override val messageType = StartExecution::class.java
@@ -55,18 +58,43 @@ class StartExecutionHandler(
 
   override fun handle(message: StartExecution) {
     message.withExecution { execution ->
-      if (execution.status == NOT_STARTED && !execution.isCanceled) {
+      if (execution.status != NOT_STARTED || execution.isCanceled) {
+        terminate(execution)
+        return@withExecution
+      }
+
+      if (!shouldLock(execution)) {
+        start(execution)
+        return@withExecution
+      }
+
+      withLocking(execution.pipelineConfigId!!, message) {
         if (execution.shouldQueue()) {
-          execution.pipelineConfigId?.let {
-            log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
-            pendingExecutionService.enqueue(it, message)
-          }
+          log.info("Queueing {} {} {}", execution.application, execution.name, execution.id)
+          pendingExecutionService.enqueue(execution.pipelineConfigId, message)
         } else {
           start(execution)
         }
-      } else {
-        terminate(execution)
       }
+    }
+  }
+
+  /**
+   * Locking is only needed when concurrency controls are active — i.e. the pipeline has a
+   * pipelineConfigId AND either limitConcurrent is enabled or maxConcurrentExecutions is set.
+   * Without these, shouldQueue() always returns false so there is no check-then-act to protect.
+   */
+  private fun shouldLock(execution: PipelineExecution): Boolean {
+    return execution.pipelineConfigId != null &&
+      (execution.isLimitConcurrent || execution.maxConcurrentExecutions > 0)
+  }
+
+  private fun withLocking(lockName: String, message: StartExecution, action: Runnable) {
+    val lockOptions = RetriableLockOptions(lockName)
+    val lockAcquired = retriableLock.lock(lockOptions, action)
+    if (!lockAcquired) {
+      log.warn("Failed to obtain lock for pipelineConfigId: {}. Pushing original message back to queue.", lockName)
+      queue.push(message)
     }
   }
 
