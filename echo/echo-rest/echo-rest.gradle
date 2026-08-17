@@ -28,6 +28,10 @@ dependencies {
   implementation "jakarta.validation:jakarta.validation-api"
   implementation "org.apache.commons:commons-lang3"
 
+  implementation "software.amazon.sns:sns-extended-client:2.1.0"
+  implementation "software.amazon.awssdk:s3"
+  implementation "software.amazon.awssdk:sns"
+
   testImplementation project(':echo-test')
   testImplementation "com.github.tomakehurst:wiremock-jre8-standalone"
   testImplementation "org.springframework.boot:spring-boot-starter-test"

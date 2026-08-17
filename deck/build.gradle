@@ -18,6 +18,9 @@ node {
 
   version = packageJson.engines.node.replaceAll(/[^\d\.]/, '')
   pnpmVersion = "11.1.1"
+
+  // Use the arm64 Node.js installed in the image rather than downloading an x64 binary.
+  download = false
 }
 
 pnpmInstall {

@@ -7,6 +7,7 @@ on:
     branches:
       - main
       - release-*
+      - "coveo/release-*"
     paths:
       - 'kayenta/**'
       - '.github/workflows/kayenta-integration-tests.yml'
