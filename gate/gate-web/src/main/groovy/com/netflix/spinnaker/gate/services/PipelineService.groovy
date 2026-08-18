@@ -204,6 +204,12 @@ class PipelineService {
     Retrofit2SyncCall.execute(orcaServiceSelector.select().restartPipelineStage(executionId, stageId, context))
   }
 
+  /** Ignore a failed pipeline stage when its configuration permits it. */
+  Map<String, Object> ignorePipelineStageFailure(String executionId, String stageId, Map<String, Object> context) {
+    setApplicationForExecution(executionId)
+    Retrofit2SyncCall.execute(orcaServiceSelector.select().ignorePipelineStageFailure(executionId, stageId, context))
+  }
+
   /** Evaluate a SpEL expression against a pipeline execution. */
   Map<String, Object> evaluateExpressionForExecution(String executionId, String pipelineExpression) {
     Retrofit2SyncCall.execute(orcaServiceSelector.select().evaluateExpressionForExecution(executionId, pipelineExpression))

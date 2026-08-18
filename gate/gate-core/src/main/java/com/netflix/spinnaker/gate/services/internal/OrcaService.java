@@ -148,6 +148,13 @@ public interface OrcaService {
 
   /** Start a pipeline execution. Orca returns {@code Map<String, Object>}. */
   @Headers("Accept: application/json")
+  @PUT("pipelines/{executionId}/stages/{stageId}/ignoreFailure")
+  Call<Map> ignorePipelineStageFailure(
+      @Path("executionId") String executionId,
+      @Path("stageId") String stageId,
+      @Body Map ignoreFailureDetails);
+
+  @Headers("Accept: application/json")
   @POST("orchestrate")
   Call<Map<String, Object>> startPipeline(
       @Body Map<String, Object> pipelineConfig, @Query("user") String user);
