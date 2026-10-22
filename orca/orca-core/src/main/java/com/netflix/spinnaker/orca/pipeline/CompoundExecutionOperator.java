@@ -17,18 +17,23 @@
 package com.netflix.spinnaker.orca.pipeline;
 
 import com.netflix.spinnaker.kork.core.RetrySupport;
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus;
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType;
 import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution;
 import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution;
 import com.netflix.spinnaker.orca.lock.RetriableLock;
 import com.netflix.spinnaker.orca.lock.RetriableLock.RetriableLockOptions;
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository;
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotUpdatableException;
+import com.netflix.spinnaker.orca.pipeline.persistence.StageUpdateResult;
 import com.netflix.spinnaker.security.AuthenticatedRequest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import javax.annotation.Nonnull;
@@ -109,6 +114,42 @@ public class CompoundExecutionOperator {
         };
     return doInternalWithLocking(
         runner::reschedule, repositoryAction, "reschedule", executionType, executionId, stageId);
+  }
+
+  public PipelineExecution updateStageIfStatus(
+      @Nonnull ExecutionType executionType,
+      @Nonnull String executionId,
+      @Nonnull String stageId,
+      @Nonnull Set<ExecutionStatus> expected,
+      @Nonnull Consumer<StageExecution> stageUpdater) {
+    var updateResult = new AtomicReference<StageUpdateResult>();
+    var updateFailure = new AtomicReference<RuntimeException>();
+    // Lock relays swallow or retry the exceptions of the action, so it must never throw.
+    Runnable repositoryAction =
+        () -> {
+          try {
+            updateResult.set(
+                repository.updateStageIfStatus(
+                    executionType, executionId, stageId, expected, stageUpdater));
+          } catch (RuntimeException e) {
+            updateFailure.set(e);
+          }
+        };
+    EnhancedExecution.withLocking(retriableLock, stageId, repositoryAction).run();
+
+    if (updateFailure.get() != null) {
+      throw updateFailure.get();
+    }
+    if (!updateResult.get().isUpdated()) {
+      throw new StageNotUpdatableException(stageId, updateResult.get().getStoredStatus());
+    }
+
+    PipelineExecution execution =
+        runWithRetries(() -> repository.retrieve(executionType, executionId));
+    if (repository.handlesPartition(execution.getPartition())) {
+      runner.reschedule(execution);
+    }
+    return execution;
   }
 
   public PipelineExecution restartStage(@Nonnull String executionId, @Nonnull String stageId) {
