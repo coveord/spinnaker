@@ -52,6 +52,7 @@ import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.initDualTcMysqlDat
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.initDualTcPostgresDatabases
 import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.NOT_STARTED
 import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.RUNNING
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.SUCCEEDED
 import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType.PIPELINE
 import static com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.BUILD_TIME_ASC
 import static com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.BUILD_TIME_DESC
@@ -286,6 +287,30 @@ abstract class SqlPipelineExecutionRepositorySpec extends PipelineExecutionRepos
     })
     result.updated
     repo.retrieve(PIPELINE, e.id).stageById(stageId).context == [foo: 'FOO']
+  }
+
+  def "conditionally updating a completed stage of a foreign execution is refused without publishing"() {
+    given:
+    Interlink interlink = Mock(Interlink)
+    ExecutionRepository repo = createExecutionRepository("test", interlink)
+    PipelineExecution e = new PipelineExecutionImpl(PIPELINE, "myapp")
+    e.stages.add(new StageExecutionImpl(e, "manualJudgment", "judgment stage", [foo: 'FOO']))
+    e.stages[0].status = SUCCEEDED
+    repo.store(e)
+    String stageId = e.stages[0].id
+    makeForeign()
+    def updaterCalls = 0
+
+    when:
+    def result = repo.updateStageIfStatus(PIPELINE, e.id, stageId, [RUNNING] as Set, { StageExecution stage ->
+      updaterCalls++
+    } as Consumer<StageExecution>)
+
+    then:
+    0 * interlink.publish(_)
+    !result.updated
+    result.storedStatus == SUCCEEDED
+    updaterCalls == 0
   }
 
   def "conditionally updating a stage of a foreign execution fails without interlink"() {
