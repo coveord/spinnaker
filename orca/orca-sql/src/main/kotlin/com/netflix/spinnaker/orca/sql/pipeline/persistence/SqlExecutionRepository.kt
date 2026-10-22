@@ -205,8 +205,8 @@ class SqlExecutionRepository(
           result = updateStageIfStatus(ctx, type, executionId, stageId, expected, updater)
         }
       }
-    } catch (e: StageUpdateAborted) {
-      throw e.reason
+    } catch (aborted: StageUpdateAborted) {
+      throw aborted.reason
     }
     return result!!
   }
@@ -225,11 +225,15 @@ class SqlExecutionRepository(
     if (isForeign(execution)) {
       val snapshot = execution.stages.find { it.id == stageId }
         ?: throw StageUpdateAborted(StageNotFoundException(executionId, stageId))
+      val snapshotStatus = snapshot.status
+      if (snapshotStatus !in expected) {
+        return StageUpdateResult(false, snapshotStatus)
+      }
       applyStageUpdater(updater, snapshot)
       val event = PatchStageInterlinkEvent(type, executionId, stageId, mapper.writeValueAsString(snapshot))
       interlink?.publish(event.withPartition(execution.partition))
         ?: throw StageUpdateAborted(ForeignExecutionException(executionId, execution.partition, partitionName))
-      return StageUpdateResult(true, snapshot.status)
+      return StageUpdateResult(true, snapshotStatus)
     }
 
     val stagesTable = type.stagesTableName
@@ -264,8 +268,8 @@ class SqlExecutionRepository(
   private fun applyStageUpdater(updater: Consumer<StageExecution>, stage: StageExecution) {
     try {
       updater.accept(stage)
-    } catch (e: RuntimeException) {
-      throw StageUpdateAborted(e)
+    } catch (updaterFailure: RuntimeException) {
+      throw StageUpdateAborted(updaterFailure)
     }
   }
 
