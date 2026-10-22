@@ -21,6 +21,7 @@ import com.netflix.spinnaker.config.CompressionType
 import com.netflix.spinnaker.config.ExecutionCompressionProperties
 import com.netflix.spinnaker.kork.sql.config.RetryProperties
 import com.netflix.spinnaker.kork.sql.test.SqlTestUtil
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
 import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution
 import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution
@@ -32,6 +33,7 @@ import com.netflix.spinnaker.orca.pipeline.model.PipelineTrigger
 import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.model.support.TriggerDeserializer
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionNotFoundException
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotFoundException
 import com.netflix.spinnaker.orca.sql.PipelineRefTriggerDeserializerSupplier
 import org.mockito.kotlin.atLeastOnce
 import org.mockito.kotlin.doReturn
@@ -42,10 +44,15 @@ import dev.minutest.rootContext
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.jooq.DSLContext
+import org.jooq.ExecuteContext
+import org.jooq.ExecuteListener
+import org.jooq.impl.DSL
 import org.jooq.impl.DSL.field
+import org.jooq.impl.DefaultExecuteListenerProvider
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.testcontainers.DockerClientFactory
 import java.lang.System.currentTimeMillis
+import java.util.concurrent.atomic.AtomicInteger
 import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource
 import javax.sql.DataSource
 import io.reactivex.rxjava3.core.Observable
@@ -578,6 +585,155 @@ class SqlExecutionRepositoryTest : JUnit5Minutests {
         assertThat(actualPipelineExecution).isEqualTo(pipelineExecution)
       }
     }
+
+    context("conditional stage update") {
+      val notComplete = ExecutionStatus.values().filterNot { it.isComplete }.toSet()
+
+      fun storeRunningJudgment(repository: SqlExecutionRepository): PipelineExecution =
+        PipelineExecutionImpl(ExecutionType.PIPELINE, "test-application").apply {
+          status = ExecutionStatus.RUNNING
+          stage {
+            type = "manualJudgment"
+            status = ExecutionStatus.RUNNING
+            context["judgmentInputs"] = listOf("approve")
+          }
+        }.also { repository.store(it) }
+
+      fun SqlExecutionRepository.storedStage(executionId: String, stageId: String) =
+        retrieve(ExecutionType.PIPELINE, executionId).stageById(stageId)
+
+      test("refuses to update a stage that another writer completed") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val stageId = execution.stages.single().id
+        val completingCopy = repository.storedStage(execution.id, stageId)
+        completingCopy.status = ExecutionStatus.SUCCEEDED
+        completingCopy.endTime = 1234L
+        repository.storeStage(completingCopy)
+
+        val result = repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, stageId, notComplete) {
+          it.context["judgmentStatus"] = "continue"
+        }
+
+        assertThat(result.isUpdated).isFalse()
+        assertThat(result.storedStatus).isEqualTo(ExecutionStatus.SUCCEEDED)
+        val stored = repository.storedStage(execution.id, stageId)
+        assertThat(stored.status).isEqualTo(ExecutionStatus.SUCCEEDED)
+        assertThat(stored.endTime).isEqualTo(1234L)
+        assertThat(stored.context).doesNotContainKey("judgmentStatus")
+      }
+
+      test("updates a running stage and keeps its status") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val stageId = execution.stages.single().id
+
+        val result = repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, stageId, notComplete) {
+          it.context["judgmentStatus"] = "continue"
+          it.lastModified = StageExecution.LastModifiedDetails().apply {
+            user = "someone@example.com"
+            lastModifiedTime = 42L
+          }
+        }
+
+        assertThat(result.isUpdated).isTrue()
+        assertThat(result.storedStatus).isEqualTo(ExecutionStatus.RUNNING)
+        val stored = repository.storedStage(execution.id, stageId)
+        assertThat(stored.status).isEqualTo(ExecutionStatus.RUNNING)
+        assertThat(stored.context)
+          .containsEntry("judgmentStatus", "continue")
+          .containsEntry("judgmentInputs", listOf("approve"))
+        assertThat(stored.lastModified?.user).isEqualTo("someone@example.com")
+        assertThat(stored.lastModified?.lastModifiedTime).isEqualTo(42L)
+      }
+
+      test("keeps a context key written after the caller read the stage") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val stageId = execution.stages.single().id
+        val concurrentCopy = repository.storedStage(execution.id, stageId)
+        concurrentCopy.context["writtenConcurrently"] = true
+        repository.storeStage(concurrentCopy)
+
+        repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, stageId, notComplete) {
+          it.context["judgmentStatus"] = "continue"
+        }
+
+        assertThat(repository.storedStage(execution.id, stageId).context)
+          .containsEntry("writtenConcurrently", true)
+          .containsEntry("judgmentStatus", "continue")
+      }
+
+      test("throws StageNotFoundException for an unknown stage without retrying") {
+        val lockingSelects = AtomicInteger()
+        val countingContext = DSL.using(
+          database.context.configuration().derive(
+            DefaultExecuteListenerProvider(object : ExecuteListener {
+              override fun executeStart(ctx: ExecuteContext) {
+                if (ctx.sql()?.contains("for update", ignoreCase = true) == true) {
+                  lockingSelects.incrementAndGet()
+                }
+              }
+            })
+          )
+        )
+        val repository = SqlExecutionRepository(
+          "test",
+          countingContext,
+          orcaObjectMapper,
+          testRetryProprties,
+          10,
+          100,
+          "poolName",
+          "myReadPoolName",
+          null,
+          emptyList(),
+          executionCompressionPropertiesDisabled,
+          false,
+          mockDataSource
+        )
+        val execution = storeRunningJudgment(repository)
+        var updaterInvocations = 0
+        lockingSelects.set(0)
+
+        assertThatThrownBy {
+          repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, "01ARZ3NDEKTSV4RRFFQ69G5FAV", notComplete) {
+            updaterInvocations++
+          }
+        }.isInstanceOf(StageNotFoundException::class.java)
+        assertThat(updaterInvocations).isEqualTo(0)
+        assertThat(lockingSelects.get()).isEqualTo(1)
+      }
+
+      test("propagates an exception thrown by the updater without retrying or writing") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val stageId = execution.stages.single().id
+        val updaterFailure = IllegalStateException("cannot update this stage")
+        var updaterInvocations = 0
+
+        assertThatThrownBy {
+          repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, stageId, notComplete) {
+            updaterInvocations++
+            it.context["judgmentStatus"] = "continue"
+            throw updaterFailure
+          }
+        }.isSameAs(updaterFailure)
+        assertThat(updaterInvocations).isEqualTo(1)
+        val stored = repository.storedStage(execution.id, stageId)
+        assertThat(stored.status).isEqualTo(ExecutionStatus.RUNNING)
+        assertThat(stored.context).doesNotContainKey("judgmentStatus")
+      }
+
+      test("throws ExecutionNotFoundException for an unknown execution") {
+        assertThatThrownBy {
+          sqlExecutionRepositoryNoCompression.updateStageIfStatus(
+            ExecutionType.PIPELINE, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW", notComplete
+          ) { }
+        }.isInstanceOf(ExecutionNotFoundException::class.java)
+      }
+    }
+
     context("read pool usage") {
       val mockedDslContext = mock<DSLContext>()
       val mockedObjectMapper = mock<ObjectMapper>()

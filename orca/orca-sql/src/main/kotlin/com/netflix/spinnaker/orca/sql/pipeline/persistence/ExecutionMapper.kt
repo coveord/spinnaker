@@ -124,17 +124,18 @@ class ExecutionMapper(
   }
 
   private fun mapStage(rs: ResultSet, executions: Map<String, PipelineExecution>) {
-    val executionId = rs.getString("execution_id")
+    val execution = executions.getValue(rs.getString("execution_id"))
+    execution.stages.add(mapStage(rs, execution))
+  }
+
+  /** Maps the current row of [rs] into a [StageExecution] belonging to [execution]. */
+  fun mapStage(rs: ResultSet, execution: PipelineExecution): StageExecution {
     val body = getDecompressedBody(rs)
-    executions.getValue(executionId)
-      .stages
-      .add(
-        mapper.readValue<StageExecution>(body)
-          .apply {
-            execution = executions.getValue(executionId)
-            setSize(body.length.toLong())
-          }
-      )
+    return mapper.readValue<StageExecution>(body)
+      .apply {
+        this.execution = execution
+        setSize(body.length.toLong())
+      }
   }
 
   @VisibleForTesting

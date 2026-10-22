@@ -145,7 +145,7 @@ internal fun SelectForUpdateStep<out Record>.fetchExecutions(
   ExecutionMapper(mapper, stageReadSize, compressionProperties, pipelineRefEnabled).map(fetch().intoResultSet(), jooq)
 
 
-private fun selectStageFields(compressionProperties: ExecutionCompressionProperties): List<Field<Any>> {
+internal fun selectStageFields(compressionProperties: ExecutionCompressionProperties): List<Field<Any>> {
   if (compressionProperties.enabled) {
     return listOf(field("execution_id"),
       field("body"),
