@@ -34,6 +34,7 @@ import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.model.support.TriggerDeserializer
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionNotFoundException
 import com.netflix.spinnaker.orca.pipeline.persistence.StageNotFoundException
+import com.netflix.spinnaker.orca.pipeline.persistence.StageUpdateResult
 import com.netflix.spinnaker.orca.sql.PipelineRefTriggerDeserializerSupplier
 import org.mockito.kotlin.atLeastOnce
 import org.mockito.kotlin.doReturn
@@ -52,6 +53,10 @@ import org.jooq.impl.DefaultExecuteListenerProvider
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.testcontainers.DockerClientFactory
 import java.lang.System.currentTimeMillis
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
 import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource
 import javax.sql.DataSource
@@ -662,6 +667,40 @@ class SqlExecutionRepositoryTest : JUnit5Minutests {
         assertThat(repository.storedStage(execution.id, stageId).context)
           .containsEntry("writtenConcurrently", true)
           .containsEntry("judgmentStatus", "continue")
+      }
+
+      test("makes a concurrent stage write wait until the conditional update commits") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val stageId = execution.stages.single().id
+        val completingCopy = repository.storedStage(execution.id, stageId)
+        completingCopy.status = ExecutionStatus.SUCCEEDED
+        val updaterEntered = CountDownLatch(1)
+        val releaseUpdater = CountDownLatch(1)
+        val writers = Executors.newFixedThreadPool(2)
+        try {
+          val conditionalUpdate = writers.submit<StageUpdateResult> {
+            repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, stageId, notComplete) {
+              it.context["judgmentStatus"] = "continue"
+              updaterEntered.countDown()
+              releaseUpdater.await(30, TimeUnit.SECONDS)
+            }
+          }
+          assertThat(updaterEntered.await(30, TimeUnit.SECONDS)).isTrue()
+
+          val completingWrite = writers.submit { repository.storeStage(completingCopy) }
+
+          assertThatThrownBy { completingWrite.get(2, TimeUnit.SECONDS) }
+            .isInstanceOf(TimeoutException::class.java)
+          releaseUpdater.countDown()
+          assertThat(conditionalUpdate.get(30, TimeUnit.SECONDS).isUpdated).isTrue()
+          completingWrite.get(30, TimeUnit.SECONDS)
+        } finally {
+          releaseUpdater.countDown()
+          writers.shutdownNow()
+        }
+
+        assertThat(repository.storedStage(execution.id, stageId).status).isEqualTo(ExecutionStatus.SUCCEEDED)
       }
 
       test("throws StageNotFoundException for an unknown stage without retrying") {
