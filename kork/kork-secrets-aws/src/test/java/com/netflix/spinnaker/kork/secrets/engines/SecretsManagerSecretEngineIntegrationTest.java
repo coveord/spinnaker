@@ -19,6 +19,13 @@ package com.netflix.spinnaker.kork.secrets.engines;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.client.builder.AwsClientBuilder;
+import com.amazonaws.services.secretsmanager.AWSSecretsManager;
+import com.amazonaws.services.secretsmanager.AWSSecretsManagerClientBuilder;
+import com.amazonaws.services.secretsmanager.model.CreateSecretRequest;
+import com.amazonaws.services.secretsmanager.model.Tag;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.spinnaker.kork.secrets.SecretConfiguration;
 import com.netflix.spinnaker.kork.secrets.user.OpaqueUserSecretData;
@@ -30,30 +37,24 @@ import com.netflix.spinnaker.kork.secrets.user.UserSecretMetadataField;
 import com.netflix.spinnaker.kork.secrets.user.UserSecretReference;
 import com.netflix.spinnaker.kork.secrets.user.UserSecretSerde;
 import com.netflix.spinnaker.kork.secrets.user.UserSecretSerdeFactory;
-import java.net.URI;
+import java.nio.ByteBuffer;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.ministack.testcontainers.MiniStackContainer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.testcontainers.DockerClientFactory;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
-import software.amazon.awssdk.services.secretsmanager.model.CreateSecretRequest;
-import software.amazon.awssdk.services.secretsmanager.model.Tag;
+import org.testcontainers.containers.localstack.LocalStackContainer;
+import org.testcontainers.utility.DockerImageName;
 
 @SpringBootTest(classes = SecretConfiguration.class)
 public class SecretsManagerSecretEngineIntegrationTest {
 
-  @Autowired private MiniStackContainer container;
+  @Autowired private LocalStackContainer container;
 
   // for setting up test data
   @Autowired private UserSecretSerdeFactory serdeFactory;
@@ -67,7 +68,15 @@ public class SecretsManagerSecretEngineIntegrationTest {
 
   @Test
   public void canDecryptUserSecret() {
-    SecretsManagerClient client = buildMiniStackClient(container);
+    AWSSecretsManager client =
+        AWSSecretsManagerClientBuilder.standard()
+            .withEndpointConfiguration(
+                new AwsClientBuilder.EndpointConfiguration(
+                    container.getEndpoint().toString(), container.getRegion()))
+            .withCredentials(
+                new AWSStaticCredentialsProvider(
+                    new BasicAWSCredentials(container.getAccessKey(), container.getSecretKey())))
+            .build();
 
     UserSecretMetadata metadata =
         UserSecretMetadata.builder()
@@ -79,14 +88,13 @@ public class SecretsManagerSecretEngineIntegrationTest {
 
     Map<String, String> secretMap = Map.of("username", "blade", "password", "hunter2");
     UserSecretData data = new OpaqueUserSecretData(secretMap);
-    SdkBytes serializedSecretPayload = SdkBytes.fromByteArray(serde.serialize(data, metadata));
+    ByteBuffer serializedSecretPayload = ByteBuffer.wrap(serde.serialize(data, metadata));
 
     client.createSecret(
-        CreateSecretRequest.builder()
-            .name("my-user-secret")
-            .secretBinary(serializedSecretPayload)
-            .tags(tagsForMetadata(metadata))
-            .build());
+        new CreateSecretRequest()
+            .withName("my-user-secret")
+            .withSecretBinary(serializedSecretPayload)
+            .withTags(tagsForMetadata(metadata)));
 
     var baseRefUri =
         String.format("secret://secrets-manager?r=%s&s=my-user-secret", container.getRegion());
@@ -103,45 +111,41 @@ public class SecretsManagerSecretEngineIntegrationTest {
         });
   }
 
-  private static SecretsManagerClient buildMiniStackClient(MiniStackContainer container) {
-    return SecretsManagerClient.builder()
-        .endpointOverride(URI.create(container.getEndpoint()))
-        .region(Region.of(container.getRegion()))
-        .credentialsProvider(
-            StaticCredentialsProvider.create(
-                AwsBasicCredentials.create(container.getAccessKey(), container.getSecretKey())))
-        .build();
-  }
-
   private static Collection<Tag> tagsForMetadata(UserSecretMetadata metadata) {
     return List.of(
-        tagForField(UserSecretMetadataField.TYPE, metadata.getType()),
-        tagForField(UserSecretMetadataField.ENCODING, metadata.getEncoding()),
-        tagForField(UserSecretMetadataField.ROLES, String.join(", ", metadata.getRoles())));
+        tagForField(UserSecretMetadataField.TYPE).withValue(metadata.getType()),
+        tagForField(UserSecretMetadataField.ENCODING).withValue(metadata.getEncoding()),
+        tagForField(UserSecretMetadataField.ROLES)
+            .withValue(String.join(", ", metadata.getRoles())));
   }
 
-  private static Tag tagForField(UserSecretMetadataField field, String value) {
-    return Tag.builder().key(field.getTagKey()).value(value).build();
+  private static Tag tagForField(UserSecretMetadataField field) {
+    return new Tag().withKey(field.getTagKey());
   }
 
   @TestConfiguration
   public static class IntegrationTestConfig {
 
-    /**
-     * Pinned deliberately: {@code MiniStackContainer}'s no-arg constructor resolves {@code latest},
-     * and the emulator releases weekly, so the tag is the only thing that fixes the version this
-     * test runs against.
-     */
-    private static final String MINISTACK_IMAGE_TAG = "1.5.10";
+    private static final DockerImageName DOCKER_IMAGE =
+        DockerImageName.parse("localstack/localstack:0.11.3");
 
     @Bean(initMethod = "start", destroyMethod = "stop")
-    public MiniStackContainer miniStackContainer() {
-      return new MiniStackContainer(MINISTACK_IMAGE_TAG);
+    public LocalStackContainer localStackContainer() {
+      return new LocalStackContainer(DOCKER_IMAGE)
+          .withServices(LocalStackContainer.Service.SECRETSMANAGER);
     }
 
     @Bean
-    public SecretsManagerClientProvider miniStackClientProvider(MiniStackContainer container) {
-      return (params) -> buildMiniStackClient(container);
+    public SecretsManagerClientProvider localstackClientProvider(LocalStackContainer container) {
+      return (params) ->
+          AWSSecretsManagerClientBuilder.standard()
+              .withEndpointConfiguration(
+                  new AwsClientBuilder.EndpointConfiguration(
+                      container.getEndpoint().toString(), container.getRegion()))
+              .withCredentials(
+                  new AWSStaticCredentialsProvider(
+                      new BasicAWSCredentials(container.getAccessKey(), container.getSecretKey())))
+              .build();
     }
 
     @Bean
