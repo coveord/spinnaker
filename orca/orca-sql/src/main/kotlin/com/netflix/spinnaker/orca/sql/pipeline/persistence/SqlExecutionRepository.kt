@@ -20,6 +20,7 @@ import com.google.common.annotations.VisibleForTesting
 import com.netflix.spinnaker.config.ExecutionCompressionProperties
 import com.netflix.spinnaker.kork.core.RetrySupport
 import com.netflix.spinnaker.kork.exceptions.ConfigurationException
+import com.netflix.spinnaker.kork.exceptions.SpinnakerException
 import com.netflix.spinnaker.kork.exceptions.SystemException
 import com.netflix.spinnaker.kork.sql.config.RetryProperties
 import com.netflix.spinnaker.kork.sql.routing.withPool
@@ -52,6 +53,8 @@ import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.Execu
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.NATURAL_ASC
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.START_TIME_OR_ID
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionCriteria
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotFoundException
+import com.netflix.spinnaker.orca.pipeline.persistence.StageUpdateResult
 import com.netflix.spinnaker.orca.pipeline.persistence.UnpausablePipelineException
 import com.netflix.spinnaker.orca.pipeline.persistence.UnresumablePipelineException
 import de.huxhorn.sulky.ulid.SpinULID
@@ -84,6 +87,7 @@ import java.io.ByteArrayOutputStream
 import java.lang.System.currentTimeMillis
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.util.function.Consumer
 import java.util.stream.Collectors.toList
 import javax.sql.DataSource
 import kotlin.collections.Collection
@@ -183,6 +187,92 @@ class SqlExecutionRepository(
     doForeignAware(PatchStageInterlinkEvent(stage.execution.type, stage.execution.id, stage.id, mapper.writeValueAsString(stage))) {
       _, dslContext ->
       jooq.transactional { storeStageInternal(dslContext, stage) }
+    }
+  }
+
+  /** Locks the stage row so the status check and the write are atomic; [updater] sees the stored stage. */
+  override fun updateStageIfStatus(
+    type: ExecutionType,
+    executionId: String,
+    stageId: String,
+    expected: Set<ExecutionStatus>,
+    updater: Consumer<StageExecution>
+  ): StageUpdateResult {
+    var result: StageUpdateResult? = null
+    try {
+      withPool(poolName) {
+        jooq.transactional { ctx ->
+          result = updateStageIfStatus(ctx, type, executionId, stageId, expected, updater)
+        }
+      }
+    } catch (e: StageUpdateAborted) {
+      throw e.reason
+    }
+    return result!!
+  }
+
+  private fun updateStageIfStatus(
+    ctx: DSLContext,
+    type: ExecutionType,
+    executionId: String,
+    stageId: String,
+    expected: Set<ExecutionStatus>,
+    updater: Consumer<StageExecution>
+  ): StageUpdateResult {
+    val execution = selectExecution(ctx, type, executionId)
+      ?: throw StageUpdateAborted(ExecutionNotFoundException("No $type found for $executionId"))
+
+    if (isForeign(execution)) {
+      val snapshot = execution.stages.find { it.id == stageId }
+        ?: throw StageUpdateAborted(StageNotFoundException(executionId, stageId))
+      applyStageUpdater(updater, snapshot)
+      val event = PatchStageInterlinkEvent(type, executionId, stageId, mapper.writeValueAsString(snapshot))
+      interlink?.publish(event.withPartition(execution.partition))
+        ?: throw StageUpdateAborted(ForeignExecutionException(executionId, execution.partition, partitionName))
+      return StageUpdateResult(true, snapshot.status)
+    }
+
+    val stagesTable = type.stagesTableName
+    val selectStage = ctx.select(selectStageFields(compressionProperties) + field("status"))
+      .from(stagesTable)
+    if (compressionProperties.enabled) {
+      selectStage.leftJoin(stagesTable.compressedExecTable).using(field("id"))
+    }
+    val stageRows = selectStage
+      .where(stageId.toWhereCondition())
+      .forUpdate()
+      .of(stagesTable)
+      .fetch()
+      .intoResultSet()
+
+    if (!stageRows.next() || execution.stages.none { it.id == stageId }) {
+      throw StageUpdateAborted(StageNotFoundException(executionId, stageId))
+    }
+
+    val storedStatus = ExecutionStatus.valueOf(stageRows.getString("status"))
+    if (storedStatus !in expected) {
+      return StageUpdateResult(false, storedStatus)
+    }
+
+    val stage = ExecutionMapper(mapper, stageReadSize, compressionProperties, pipelineRefEnabled)
+      .mapStage(stageRows, execution)
+    applyStageUpdater(updater, stage)
+    storeStageInternal(ctx, stage)
+    return StageUpdateResult(true, storedStatus)
+  }
+
+  private fun applyStageUpdater(updater: Consumer<StageExecution>, stage: StageExecution) {
+    try {
+      updater.accept(stage)
+    } catch (e: RuntimeException) {
+      throw StageUpdateAborted(e)
+    }
+  }
+
+  /** Carries a failure out of [transactional] without retrying, which it does for anything not marked non-retryable. */
+  private class StageUpdateAborted(val reason: RuntimeException) : SpinnakerException(reason) {
+    init {
+      setRetryable(false)
     }
   }
 
