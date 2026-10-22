@@ -24,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -259,6 +260,46 @@ final class CompoundExecutionOperatorTest {
     }
 
     @Test
+    void lockReportingAcquiredWithoutRunningTheUpdateFailsWithIllegalState() {
+      RetriableLock lockThatSkipsTheAction =
+          new RetriableLock(new LockThatSkipsTheAction(), realRetrySupport);
+
+      assertThatThrownBy(() -> updateStage(operatorWithLock(lockThatSkipsTheAction)))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessage("Stage update for STAGE_ID did not run under the lock");
+      verify(runner, never()).reschedule(any());
+    }
+
+    @Test
+    void updateSucceedsWhenTheLockRunsItAgainAfterAFailure() {
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenThrow(new CannotUpdateStage("Transient failure."))
+          .thenReturn(new StageUpdateResult(true, RUNNING));
+      when(repository.handlesPartition(execution.getPartition())).thenReturn(true);
+      RetriableLock lockThatRunsTheActionTwice =
+          new RetriableLock(new LockThatRunsTheActionTwice(), realRetrySupport);
+
+      PipelineExecution updated = updateStage(operatorWithLock(lockThatRunsTheActionTwice));
+
+      assertThat(updated).isSameAs(execution);
+      verify(runner, times(1)).reschedule(execution);
+    }
+
+    @Test
+    void acceptedUpdateReturnsTheExecutionWhenReschedulingFails() {
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenReturn(new StageUpdateResult(true, RUNNING));
+      when(repository.handlesPartition(execution.getPartition())).thenReturn(true);
+      doThrow(new IllegalStateException("Queue unavailable")).when(runner).reschedule(execution);
+
+      PipelineExecution updated = updateStage(operatorWithLock(lockThatRunsTheAction));
+
+      assertThat(updated).isSameAs(execution);
+    }
+
+    @Test
     void failureToAcquireTheLockPropagates() {
       RetriableLock unavailableLock = mock(RetriableLock.class);
       when(unavailableLock.lock(any(), any())).thenReturn(false);
@@ -277,6 +318,33 @@ final class CompoundExecutionOperatorTest {
     }
   }
 
+  /** Mirrors a lock that reports acquisition even though it never ran the action. */
+  private static final class LockThatSkipsTheAction implements RunOnLockAcquired {
+    @Override
+    public RunOnLockResult<Void> execute(Runnable action, String keyName) {
+      return new RunOnLockResult<>(true, false, null, null);
+    }
+
+    @Override
+    public <R> RunOnLockResult<R> execute(Callable<R> action, String keyName) {
+      throw new UnsupportedOperationException();
+    }
+  }
+
+  private static final class LockThatRunsTheActionTwice implements RunOnLockAcquired {
+    @Override
+    public RunOnLockResult<Void> execute(Runnable action, String keyName) {
+      action.run();
+      action.run();
+      return new RunOnLockResult<>(true, true, null, null);
+    }
+
+    @Override
+    public <R> RunOnLockResult<R> execute(Callable<R> action, String keyName) {
+      throw new UnsupportedOperationException();
+    }
+  }
+
   /** Mirrors the Redis lock, which reports an exception thrown by the action as lock acquired. */
   private static final class LockThatReportsActionFailures implements RunOnLockAcquired {
     @Override
@@ -284,8 +352,8 @@ final class CompoundExecutionOperatorTest {
       try {
         action.run();
         return new RunOnLockResult<>(true, true, null, null);
-      } catch (Exception e) {
-        return new RunOnLockResult<>(true, false, e, null);
+      } catch (Exception actionFailure) {
+        return new RunOnLockResult<>(true, false, actionFailure, null);
       }
     }
 
