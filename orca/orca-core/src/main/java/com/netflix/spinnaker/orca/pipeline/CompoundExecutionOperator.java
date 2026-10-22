@@ -127,18 +127,24 @@ public class CompoundExecutionOperator {
     // Lock relays swallow or retry the exceptions of the action, so it must never throw.
     Runnable repositoryAction =
         () -> {
+          updateResult.set(null);
+          updateFailure.set(null);
           try {
             updateResult.set(
                 repository.updateStageIfStatus(
                     executionType, executionId, stageId, expected, stageUpdater));
-          } catch (RuntimeException e) {
-            updateFailure.set(e);
+          } catch (RuntimeException updateException) {
+            updateFailure.set(updateException);
           }
         };
     EnhancedExecution.withLocking(retriableLock, stageId, repositoryAction).run();
 
     if (updateFailure.get() != null) {
       throw updateFailure.get();
+    }
+    if (updateResult.get() == null) {
+      throw new IllegalStateException(
+          "Stage update for " + stageId + " did not run under the lock");
     }
     if (!updateResult.get().isUpdated()) {
       throw new StageNotUpdatableException(stageId, updateResult.get().getStoredStatus());
@@ -147,7 +153,15 @@ public class CompoundExecutionOperator {
     PipelineExecution execution =
         runWithRetries(() -> repository.retrieve(executionType, executionId));
     if (repository.handlesPartition(execution.getPartition())) {
-      runner.reschedule(execution);
+      try {
+        runner.reschedule(execution);
+      } catch (RuntimeException rescheduleException) {
+        log.warn(
+            "Failed to reschedule execution {} after updating stage {}",
+            executionId,
+            stageId,
+            rescheduleException);
+      }
     }
     return execution;
   }
