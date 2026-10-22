@@ -34,18 +34,7 @@ public interface ExecutionRepository {
 
   void storeStage(@Nonnull StageExecution stage);
 
-  /**
-   * Applies {@code updater} to the stored stage and stores it, but only if the status currently
-   * stored for the stage is one of {@code expected}. This prevents a stale copy of a stage from
-   * overwriting a newer state, for example a stage that completed after the caller read it.
-   *
-   * <p>The default implementation reads the stored execution before updating the stage, which
-   * narrows but does not close the window between the check and the update. Implementations should
-   * override it to perform both atomically.
-   *
-   * @return whether the stage was updated, and the status that was stored for it
-   * @throws StageNotFoundException if the execution has no stage with id {@code stageId}
-   */
+  /** Applies {@code updater} to the stored stage and stores it only if its status is expected. */
   default StageUpdateResult updateStageIfStatus(
       @Nonnull ExecutionType type,
       @Nonnull String executionId,

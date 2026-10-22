@@ -14,7 +14,10 @@
 package com.netflix.spinnaker.orca.pipeline.persistence;
 
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ResponseStatus;
 
+@ResponseStatus(HttpStatus.CONFLICT)
 public class StageNotUpdatableException extends RuntimeException {
   public StageNotUpdatableException(String stageId, ExecutionStatus storedStatus) {
     super(
