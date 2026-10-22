@@ -403,20 +403,21 @@ class TaskControllerSpec extends Specification {
 
   void 'updating a completed stage responds 409 with the reason'() {
     given:
+    def mockMvcWithErrorHandling = MockMvcBuilders.standaloneSetup(taskController)
+      .setControllerAdvice(new GenericExceptionHandlers(new ExceptionMessageDecorator(Mock(ObjectProvider))))
+      .build()
     executionOperator.updateStageIfStatus(*_) >> {
       throw new StageNotUpdatableException("s1", ExecutionStatus.SUCCEEDED)
     }
 
     when:
-    def response = mockMvc.perform(patch("/pipelines/p1/stages/s1").content(
+    def response = mockMvcWithErrorHandling.perform(patch("/pipelines/p1/stages/s1").content(
       objectMapper.writeValueAsString([judgmentStatus: "continue"])
     ).contentType(MediaType.APPLICATION_JSON)).andReturn().response
 
     then:
     response.status == 409
-    new JsonSlurper().parseText(response.contentAsString) == [
-      message: "Stage s1 is SUCCEEDED; completed stages cannot be updated"
-    ]
+    response.errorMessage == "Stage s1 is SUCCEEDED; completed stages cannot be updated"
   }
 
   void '/applications/{application}/pipelines/search should return pipelines of all types if triggerTypes if not provided'() {

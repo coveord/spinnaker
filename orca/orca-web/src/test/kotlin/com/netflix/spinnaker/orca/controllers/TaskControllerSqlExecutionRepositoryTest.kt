@@ -289,8 +289,7 @@ class TaskControllerSqlExecutionRepositoryTest : JUnit5Minutests {
         val response = patchStage(execution.id, stage.id, mapOf("judgmentStatus" to "continue"))
 
         assertThat(response.status).isEqualTo(409)
-        assertThat(OrcaObjectMapper.getInstance().readValue(response.contentAsString, Map::class.java))
-          .isEqualTo(mapOf("message" to "Stage ${stage.id} is SUCCEEDED; completed stages cannot be updated"))
+        assertThat(response.errorMessage).isEqualTo("Stage ${stage.id} is SUCCEEDED; completed stages cannot be updated")
         assertThat(storedStage(execution).status).isEqualTo(ExecutionStatus.SUCCEEDED)
         assertThat(storedStage(execution).context).doesNotContainKey("judgmentStatus")
       }
