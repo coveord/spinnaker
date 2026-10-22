@@ -42,6 +42,7 @@ import com.netflix.spinnaker.orca.pipeline.StageDefinitionBuilderFactory
 import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionNotFoundException
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotUpdatableException
 import com.netflix.spinnaker.orca.pipeline.util.ContextParameterProcessor
 import com.netflix.spinnaker.orca.util.ExpressionUtils
 import com.netflix.spinnaker.security.AuthenticatedRequest
@@ -53,6 +54,7 @@ import org.springframework.security.access.prepost.PostAuthorize
 import org.springframework.security.access.prepost.PostFilter
 import org.springframework.security.access.prepost.PreAuthorize
 import org.springframework.security.access.prepost.PreFilter
+import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
@@ -83,6 +85,9 @@ import static java.time.temporal.ChronoUnit.DAYS
 @Slf4j
 @RestController
 class TaskController {
+  private static final Set<ExecutionStatus> NOT_COMPLETE_STATUSES =
+    EnumSet.copyOf(ExecutionStatus.values().findAll { !it.complete })
+
   Front50Service front50Service
   ExecutionRepository executionRepository
   ExecutionRunner executionRunner
@@ -625,7 +630,7 @@ class TaskController {
   PipelineExecution updatePipelineStage(
     @PathVariable String id,
     @PathVariable String stageId, @RequestBody Map context) {
-    return executionOperator.updateStage(PIPELINE, id, stageId,
+    return executionOperator.updateStageIfStatus(PIPELINE, id, stageId, NOT_COMPLETE_STATUSES,
         { stage ->
           stage.context.putAll(context)
           validateStageUpdate(stage)
@@ -1185,4 +1190,10 @@ class TaskController {
   @InheritConstructors
   @ResponseStatus(HttpStatus.METHOD_NOT_ALLOWED)
   private static class CannotUpdateExecutionStage extends RuntimeException {}
+
+  @ExceptionHandler(StageNotUpdatableException)
+  @ResponseStatus(HttpStatus.CONFLICT)
+  Map<String, String> handleStageNotUpdatable(StageNotUpdatableException e) {
+    return [message: e.message]
+  }
 }
