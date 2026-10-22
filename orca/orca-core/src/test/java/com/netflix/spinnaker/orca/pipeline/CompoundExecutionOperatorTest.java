@@ -16,24 +16,44 @@
 
 package com.netflix.spinnaker.orca.pipeline;
 
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.NOT_STARTED;
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.RUNNING;
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.SUCCEEDED;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.netflix.spinnaker.kork.core.RetrySupport;
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus;
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType;
 import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution;
 import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution;
+import com.netflix.spinnaker.orca.lock.NoOpRunOnLockAcquired;
 import com.netflix.spinnaker.orca.lock.RetriableLock;
+import com.netflix.spinnaker.orca.lock.RunOnLockAcquired;
+import com.netflix.spinnaker.orca.lock.RunOnLockResult;
 import com.netflix.spinnaker.orca.pipeline.model.PipelineExecutionImpl;
 import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl;
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository;
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotUpdatableException;
+import com.netflix.spinnaker.orca.pipeline.persistence.StageUpdateResult;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.function.Consumer;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 final class CompoundExecutionOperatorTest {
@@ -139,6 +159,140 @@ final class CompoundExecutionOperatorTest {
     assertEquals(null, updatedPreconditionsList.get("preconditions"));
     assertEquals(expectedStageMap.get("type"), updatedExecution.getStages().get(0).getType());
     assertEquals(APPLICATION, updatedExecution.getApplication());
+  }
+
+  @Nested
+  class UpdateStageIfStatus {
+    private final Set<ExecutionStatus> notComplete = EnumSet.of(NOT_STARTED, RUNNING);
+    private final Consumer<StageExecution> updater =
+        stage -> stage.getContext().put("judgmentStatus", "continue");
+    private final RetrySupport realRetrySupport = new RetrySupport();
+    private final RetriableLock lockThatRunsTheAction = mock(RetriableLock.class);
+
+    @BeforeEach
+    void setUp() {
+      when(lockThatRunsTheAction.lock(any(), any()))
+          .thenAnswer(
+              invocation -> {
+                invocation.<Runnable>getArgument(1).run();
+                return true;
+              });
+      when(repository.retrieve(ExecutionType.PIPELINE, EXECUTION_ID)).thenReturn(execution);
+    }
+
+    private CompoundExecutionOperator operatorWithLock(RetriableLock lock) {
+      return new CompoundExecutionOperator(repository, runner, realRetrySupport, lock);
+    }
+
+    private PipelineExecution updateStage(CompoundExecutionOperator operator) {
+      return operator.updateStageIfStatus(
+          ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater);
+    }
+
+    @Test
+    void refusedUpdateThrowsStageNotUpdatableWithoutRescheduling() {
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenReturn(new StageUpdateResult(false, SUCCEEDED));
+
+      assertThatThrownBy(() -> updateStage(operatorWithLock(lockThatRunsTheAction)))
+          .isInstanceOf(StageNotUpdatableException.class)
+          .hasMessage("Stage STAGE_ID is SUCCEEDED; completed stages cannot be updated");
+      verify(runner, never()).reschedule(any());
+    }
+
+    @Test
+    void acceptedUpdateReschedulesOnceAndReturnsTheExecution() {
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenReturn(new StageUpdateResult(true, RUNNING));
+      when(repository.handlesPartition(execution.getPartition())).thenReturn(true);
+
+      PipelineExecution updated = updateStage(operatorWithLock(lockThatRunsTheAction));
+
+      assertThat(updated).isSameAs(execution);
+      verify(runner, times(1)).reschedule(execution);
+    }
+
+    @Test
+    void acceptedUpdateOfAForeignExecutionDoesNotReschedule() {
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenReturn(new StageUpdateResult(true, RUNNING));
+      when(repository.handlesPartition(execution.getPartition())).thenReturn(false);
+
+      PipelineExecution updated = updateStage(operatorWithLock(lockThatRunsTheAction));
+
+      assertThat(updated).isSameAs(execution);
+      verify(runner, never()).reschedule(any());
+    }
+
+    @Test
+    void repositoryFailurePropagatesThroughTheNoOpLock() {
+      RuntimeException failure = new CannotUpdateStage("Cannot manually skip stage.");
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenThrow(failure);
+      RetriableLock noOpLock = new RetriableLock(new NoOpRunOnLockAcquired(), realRetrySupport);
+
+      assertThatThrownBy(() -> updateStage(operatorWithLock(noOpLock))).isSameAs(failure);
+      verify(repository, times(1))
+          .updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater);
+      verify(runner, never()).reschedule(any());
+    }
+
+    @Test
+    void repositoryFailurePropagatesThroughALockThatReportsTheException() {
+      RuntimeException failure = new CannotUpdateStage("Cannot manually skip stage.");
+      when(repository.updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater))
+          .thenThrow(failure);
+      RetriableLock relayingLock =
+          new RetriableLock(new LockThatReportsActionFailures(), realRetrySupport);
+
+      assertThatThrownBy(() -> updateStage(operatorWithLock(relayingLock))).isSameAs(failure);
+      verify(repository, times(1))
+          .updateStageIfStatus(
+              ExecutionType.PIPELINE, EXECUTION_ID, STAGE_ID, notComplete, updater);
+      verify(runner, never()).reschedule(any());
+    }
+
+    @Test
+    void failureToAcquireTheLockPropagates() {
+      RetriableLock unavailableLock = mock(RetriableLock.class);
+      when(unavailableLock.lock(any(), any())).thenReturn(false);
+
+      assertThatThrownBy(() -> updateStage(operatorWithLock(unavailableLock)))
+          .hasMessageContaining("Failed to acquire lock");
+      verify(repository, never())
+          .updateStageIfStatus(any(), anyString(), anyString(), any(), any());
+      verify(runner, never()).reschedule(any());
+    }
+  }
+
+  private static final class CannotUpdateStage extends RuntimeException {
+    CannotUpdateStage(String message) {
+      super(message);
+    }
+  }
+
+  /** Mirrors the Redis lock, which reports an exception thrown by the action as lock acquired. */
+  private static final class LockThatReportsActionFailures implements RunOnLockAcquired {
+    @Override
+    public RunOnLockResult<Void> execute(Runnable action, String keyName) {
+      try {
+        action.run();
+        return new RunOnLockResult<>(true, true, null, null);
+      } catch (Exception e) {
+        return new RunOnLockResult<>(true, false, e, null);
+      }
+    }
+
+    @Override
+    public <R> RunOnLockResult<R> execute(Callable<R> action, String keyName) {
+      throw new UnsupportedOperationException();
+    }
   }
 
   private PipelineExecution buildExpectedExecution(
