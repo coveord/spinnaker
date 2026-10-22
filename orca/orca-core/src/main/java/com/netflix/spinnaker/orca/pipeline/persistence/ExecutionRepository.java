@@ -25,6 +25,7 @@ import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution;
 import io.reactivex.rxjava3.core.Observable;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Consumer;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
@@ -32,6 +33,38 @@ public interface ExecutionRepository {
   void store(@Nonnull PipelineExecution execution);
 
   void storeStage(@Nonnull StageExecution stage);
+
+  /**
+   * Applies {@code updater} to the stored stage and stores it, but only if the status currently
+   * stored for the stage is one of {@code expected}. This prevents a stale copy of a stage from
+   * overwriting a newer state, for example a stage that completed after the caller read it.
+   *
+   * <p>The default implementation reads the stored execution before updating the stage, which
+   * narrows but does not close the window between the check and the update. Implementations should
+   * override it to perform both atomically.
+   *
+   * @return whether the stage was updated, and the status that was stored for it
+   * @throws StageNotFoundException if the execution has no stage with id {@code stageId}
+   */
+  default StageUpdateResult updateStageIfStatus(
+      @Nonnull ExecutionType type,
+      @Nonnull String executionId,
+      @Nonnull String stageId,
+      @Nonnull Set<ExecutionStatus> expected,
+      @Nonnull Consumer<StageExecution> updater) {
+    StageExecution stage =
+        retrieve(type, executionId, true).getStages().stream()
+            .filter(it -> it.getId().equals(stageId))
+            .findFirst()
+            .orElseThrow(() -> new StageNotFoundException(executionId, stageId));
+    ExecutionStatus storedStatus = stage.getStatus();
+    if (!expected.contains(storedStatus)) {
+      return new StageUpdateResult(false, storedStatus);
+    }
+    updater.accept(stage);
+    storeStage(stage);
+    return new StageUpdateResult(true, storedStatus);
+  }
 
   void updateStageContext(@Nonnull StageExecution stage);
 
