@@ -19,8 +19,11 @@ import com.netflix.spinnaker.config.CompressionType
 import com.netflix.spinnaker.config.ExecutionCompressionProperties
 import com.netflix.spinnaker.kork.sql.config.RetryProperties
 import com.netflix.spinnaker.kork.sql.test.SqlTestUtil
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
 import com.netflix.spinnaker.orca.jackson.OrcaObjectMapper
+import com.netflix.spinnaker.orca.pipeline.model.PipelineExecutionImpl
+import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatCode
 import org.jooq.impl.DSL.field
@@ -165,5 +168,39 @@ class SqlExecutionRepositoryPostgresCompressionTest {
       .fetch()
     assertThat(compressedExecutions).hasSize(1)
     assertThat(compressedExecutions.getValue(0, field("compression_type"))).isEqualTo("ZLIB")
+  }
+
+  @Test
+  fun `conditional update of a running stage with a compressed body succeeds against PostgreSQL`() {
+    val execution = PipelineExecutionImpl(testType, testApplication).apply {
+      status = ExecutionStatus.RUNNING
+    }
+    val stage = StageExecutionImpl(
+      execution,
+      "manualJudgment",
+      mutableMapOf<String, Any>("instructions" to "x".repeat(2048))
+    ).apply { status = ExecutionStatus.RUNNING }
+    execution.stages.add(stage)
+    assertThat(orcaObjectMapper.writeValueAsString(stage).length)
+      .isGreaterThan(executionCompressionPropertiesEnabled.bodyCompressionThreshold)
+    sqlExecutionRepository.store(execution)
+
+    val result = sqlExecutionRepository.updateStageIfStatus(
+      testType,
+      execution.id,
+      stage.id,
+      ExecutionStatus.values().filterNot { it.isComplete }.toSet()
+    ) { it.context["judgmentStatus"] = "continue" }
+
+    assertThat(result.isUpdated).isTrue()
+    val stored = sqlExecutionRepository.retrieve(testType, execution.id).stageById(stage.id)
+    assertThat(stored.status).isEqualTo(ExecutionStatus.RUNNING)
+    assertThat(stored.context).containsEntry("judgmentStatus", "continue")
+    val compressedBody = database.context
+      .select(field("compressed_body"))
+      .from(testType.stagesTableName.compressedExecTable)
+      .where(field("id").eq(stage.id))
+      .fetchOne(field("compressed_body"), ByteArray::class.java)
+    assertThat(compressedBody).isNotEmpty()
   }
 }

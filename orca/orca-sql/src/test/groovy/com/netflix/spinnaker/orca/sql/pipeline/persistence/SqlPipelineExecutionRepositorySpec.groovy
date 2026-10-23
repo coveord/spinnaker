@@ -35,6 +35,7 @@ import com.netflix.spinnaker.orca.pipeline.model.PipelineExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository
 import com.netflix.spinnaker.orca.pipeline.persistence.PipelineExecutionRepositoryTck
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotFoundException
 import org.jooq.impl.DSL
 import io.reactivex.rxjava3.schedulers.Schedulers
 import de.huxhorn.sulky.ulid.ULID
@@ -44,10 +45,14 @@ import spock.lang.Subject
 import spock.lang.Unroll
 
 import javax.sql.DataSource
+import java.util.function.Consumer
 
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.cleanupDb
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.initDualTcMysqlDatabases
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.initDualTcPostgresDatabases
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.NOT_STARTED
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.RUNNING
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.SUCCEEDED
 import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType.PIPELINE
 import static com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.BUILD_TIME_ASC
 import static com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.BUILD_TIME_DESC
@@ -255,6 +260,96 @@ abstract class SqlPipelineExecutionRepositorySpec extends PipelineExecutionRepos
 
     then:
     1 * interlink.publish(_ as PatchStageInterlinkEvent)
+  }
+
+  def "conditionally updating a stage of a foreign execution sends the patched stage through interlink"() {
+    given:
+    Interlink interlink = Mock(Interlink)
+    ExecutionRepository repo = createExecutionRepository("test", interlink)
+    PipelineExecution e = new PipelineExecutionImpl(PIPELINE, "myapp")
+    e.stages.add(new StageExecutionImpl(e, "manualJudgment", "judgment stage", [foo: 'FOO']))
+    e.stages[0].status = RUNNING
+    repo.store(e)
+    String stageId = e.stages[0].id
+    makeForeign()
+
+    when:
+    def result = repo.updateStageIfStatus(PIPELINE, e.id, stageId, [RUNNING] as Set, { StageExecution stage ->
+      stage.context.judgmentStatus = "continue"
+    } as Consumer<StageExecution>)
+
+    then:
+    1 * interlink.publish({ PatchStageInterlinkEvent event ->
+      event.partition == "foreign" &&
+        event.executionId == e.id &&
+        event.stageId == stageId &&
+        mapper.readValue(event.stageBody, Map).context == [foo: 'FOO', judgmentStatus: 'continue']
+    })
+    result.updated
+    repo.retrieve(PIPELINE, e.id).stageById(stageId).context == [foo: 'FOO']
+  }
+
+  def "conditionally updating a completed stage of a foreign execution is refused without publishing"() {
+    given:
+    Interlink interlink = Mock(Interlink)
+    ExecutionRepository repo = createExecutionRepository("test", interlink)
+    PipelineExecution e = new PipelineExecutionImpl(PIPELINE, "myapp")
+    e.stages.add(new StageExecutionImpl(e, "manualJudgment", "judgment stage", [foo: 'FOO']))
+    e.stages[0].status = SUCCEEDED
+    repo.store(e)
+    String stageId = e.stages[0].id
+    makeForeign()
+    def updaterCalls = 0
+
+    when:
+    def result = repo.updateStageIfStatus(PIPELINE, e.id, stageId, [RUNNING] as Set, { StageExecution stage ->
+      updaterCalls++
+    } as Consumer<StageExecution>)
+
+    then:
+    0 * interlink.publish(_)
+    !result.updated
+    result.storedStatus == SUCCEEDED
+    updaterCalls == 0
+  }
+
+  def "conditionally updating a stage of a foreign execution fails without interlink"() {
+    given:
+    ExecutionRepository repo = createExecutionRepository()
+    PipelineExecution e = new PipelineExecutionImpl(PIPELINE, "myapp")
+    e.stages.add(new StageExecutionImpl(e, "manualJudgment", "judgment stage", [foo: 'FOO']))
+    repo.store(e)
+    makeForeign()
+
+    when:
+    repo.updateStageIfStatus(PIPELINE, e.id, e.stages[0].id, [NOT_STARTED] as Set, { } as Consumer<StageExecution>)
+
+    then:
+    thrown(ForeignExecutionException)
+  }
+
+  def "conditionally updating an unknown stage of a foreign execution fails with StageNotFoundException"() {
+    given:
+    Interlink interlink = Mock(Interlink)
+    ExecutionRepository repo = createExecutionRepository("test", interlink)
+    PipelineExecution e = new PipelineExecutionImpl(PIPELINE, "myapp")
+    e.stages.add(new StageExecutionImpl(e, "manualJudgment", "judgment stage", [foo: 'FOO']))
+    repo.store(e)
+    makeForeign()
+
+    when:
+    repo.updateStageIfStatus(PIPELINE, e.id, ulid.nextULID(), [NOT_STARTED] as Set, { } as Consumer<StageExecution>)
+
+    then:
+    thrown(StageNotFoundException)
+    0 * interlink.publish(_)
+  }
+
+  private void makeForeign() {
+    currentDatabase.context
+      .update(DSL.table("pipelines"))
+      .set(DSL.field(DSL.name("partition")), DSL.value("foreign"))
+      .execute()
   }
 
   def "can store a pipeline with a provided ULID"() {

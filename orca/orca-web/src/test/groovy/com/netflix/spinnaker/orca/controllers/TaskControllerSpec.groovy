@@ -23,6 +23,9 @@ import com.netflix.spinnaker.config.TaskControllerConfigurationProperties
 import com.netflix.spinnaker.kork.artifacts.model.Artifact
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerHttpException
 import com.netflix.spinnaker.orca.api.pipeline.graph.StageDefinitionBuilder
+import com.netflix.spinnaker.kork.web.exceptions.ExceptionMessageDecorator
+import com.netflix.spinnaker.kork.web.exceptions.GenericExceptionHandlers
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
 import com.netflix.spinnaker.orca.front50.Front50Service
 import com.netflix.spinnaker.orca.jackson.OrcaObjectMapper
@@ -30,12 +33,16 @@ import com.netflix.spinnaker.orca.pipeline.CompoundExecutionOperator
 import com.netflix.spinnaker.orca.pipeline.ExecutionRunner
 import com.netflix.spinnaker.orca.pipeline.StageDefinitionBuilderFactory
 import com.netflix.spinnaker.orca.pipeline.model.*
+import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionNotFoundException
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotFoundException
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotUpdatableException
 import com.netflix.spinnaker.orca.pipeline.util.ContextParameterProcessor
 import com.netflix.spinnaker.orca.util.ExpressionUtils
 import groovy.json.JsonSlurper
 import jakarta.servlet.ServletException
 import okhttp3.ResponseBody
+import org.springframework.beans.factory.ObjectProvider
 import org.springframework.http.MediaType
 import org.springframework.mock.web.MockHttpServletResponse
 import org.springframework.test.web.servlet.MockMvc
@@ -76,22 +83,23 @@ class TaskControllerSpec extends Specification {
   int daysOfExecutionHistory = taskControllerConfigurationProperties.getDaysOfExecutionHistory()
   ObjectMapper objectMapper = OrcaObjectMapper.newInstance()
 
+  TaskController taskController
+
   void setup() {
-    mockMvc = MockMvcBuilders.standaloneSetup(
-      new TaskController(
-        front50Service,
-        executionRepository,
-        executionRunner,
-        executionOperator,
-        List.of(Mock(StageDefinitionBuilder)),
-        new ContextParameterProcessor(),
-        Mock(ExpressionUtils),
-        mapper,
-        registry,
-        Mock(StageDefinitionBuilderFactory),
-        taskControllerConfigurationProperties
-      )
-    ).build()
+    taskController = new TaskController(
+      front50Service,
+      executionRepository,
+      executionRunner,
+      executionOperator,
+      List.of(Mock(StageDefinitionBuilder)),
+      new ContextParameterProcessor(),
+      Mock(ExpressionUtils),
+      mapper,
+      registry,
+      Mock(StageDefinitionBuilderFactory),
+      taskControllerConfigurationProperties
+    )
+    mockMvc = MockMvcBuilders.standaloneSetup(taskController).build()
   }
 
   void '/tasks returns a list of active tasks'() {
@@ -353,12 +361,13 @@ class TaskControllerSpec extends Specification {
     results.id == ['newer-2', 'newer-1']
   }
 
-  void 'should update existing stage context'() {
+  void 'should update existing stage context only while the stage is not complete'() {
     given:
     def pipeline = PipelineExecutionImpl.newPipeline("covfefe")
     def pipelineStage = new StageExecutionImpl(pipeline, "test", [value: "1"])
     pipelineStage.id = "s1"
     pipeline.stages.add(pipelineStage)
+    def notCompleteStatuses = ExecutionStatus.values().findAll { status -> !status.complete } as Set
 
     when:
     mockMvc.perform(patch("/pipelines/$pipeline.id/stages/s1").content(
@@ -366,7 +375,49 @@ class TaskControllerSpec extends Specification {
     ).contentType(MediaType.APPLICATION_JSON)).andReturn().response
 
     then:
-    1 * executionOperator.updateStage(pipeline.type, pipeline.id, pipelineStage.id, _)
+    1 * executionOperator.updateStageIfStatus(pipeline.type, pipeline.id, pipelineStage.id, notCompleteStatuses, _)
+    0 * executionOperator.updateStage(*_)
+  }
+
+  @Unroll
+  void 'updating a stage responds #expectedStatus when the operator throws #exception.class.simpleName'() {
+    given:
+    def mockMvcWithErrorHandling = MockMvcBuilders.standaloneSetup(taskController)
+      .setControllerAdvice(new GenericExceptionHandlers(new ExceptionMessageDecorator(Mock(ObjectProvider))))
+      .build()
+    executionOperator.updateStageIfStatus(*_) >> { throw exception }
+
+    when:
+    def response = mockMvcWithErrorHandling.perform(patch("/pipelines/p1/stages/s1").content(
+      objectMapper.writeValueAsString([judgmentStatus: "continue"])
+    ).contentType(MediaType.APPLICATION_JSON)).andReturn().response
+
+    then:
+    response.status == expectedStatus
+
+    where:
+    exception                                                          || expectedStatus
+    new StageNotFoundException("p1", "s1")                             || 404
+    new ExecutionNotFoundException("No PIPELINE found for p1")         || 404
+  }
+
+  void 'updating a completed stage responds 409 with the reason'() {
+    given:
+    def mockMvcWithErrorHandling = MockMvcBuilders.standaloneSetup(taskController)
+      .setControllerAdvice(new GenericExceptionHandlers(new ExceptionMessageDecorator(Mock(ObjectProvider))))
+      .build()
+    executionOperator.updateStageIfStatus(*_) >> {
+      throw new StageNotUpdatableException("s1", ExecutionStatus.SUCCEEDED)
+    }
+
+    when:
+    def response = mockMvcWithErrorHandling.perform(patch("/pipelines/p1/stages/s1").content(
+      objectMapper.writeValueAsString([judgmentStatus: "continue"])
+    ).contentType(MediaType.APPLICATION_JSON)).andReturn().response
+
+    then:
+    response.status == 409
+    response.errorMessage == "Stage s1 is SUCCEEDED; completed stages cannot be updated"
   }
 
   void '/applications/{application}/pipelines/search should return pipelines of all types if triggerTypes if not provided'() {

@@ -83,6 +83,9 @@ import static java.time.temporal.ChronoUnit.DAYS
 @Slf4j
 @RestController
 class TaskController {
+  private static final Set<ExecutionStatus> NOT_COMPLETE_STATUSES =
+    EnumSet.copyOf(ExecutionStatus.values().findAll { !it.complete })
+
   Front50Service front50Service
   ExecutionRepository executionRepository
   ExecutionRunner executionRunner
@@ -625,7 +628,7 @@ class TaskController {
   PipelineExecution updatePipelineStage(
     @PathVariable String id,
     @PathVariable String stageId, @RequestBody Map context) {
-    return executionOperator.updateStage(PIPELINE, id, stageId,
+    return executionOperator.updateStageIfStatus(PIPELINE, id, stageId, NOT_COMPLETE_STATUSES,
         { stage ->
           stage.context.putAll(context)
           validateStageUpdate(stage)
