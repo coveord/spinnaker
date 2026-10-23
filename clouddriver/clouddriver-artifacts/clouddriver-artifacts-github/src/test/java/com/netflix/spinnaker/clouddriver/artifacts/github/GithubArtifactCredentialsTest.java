@@ -177,35 +177,38 @@ class GithubArtifactCredentialsTest {
   }
 
   @Test
-  void downloadWithARestrictedUrl() throws IOException {
-    // explicitly deny the test server we're hitting.
+  void downloadWithARestrictedUrl(@WiremockResolver.Wiremock WireMockServer server)
+      throws IOException {
     // Github is interesting as ANY URL has to support BOTH the regular url & the download_url
-    // expected by the response.
-    // IT's VERY likely this is the same.  BUT should document this.
+    // expected by the response. Both must be on allowed hosts.
     GitHubArtifactAccount account =
         GitHubArtifactAccount.builder()
             .urlRestrictions(
                 HttpUrlRestrictions.builder()
-                    .allowedDomains(
-                        List.of("www.http-response.com", "jsonplaceholder.typicode.com"))
+                    .allowedDomains(List.of("localhost"))
+                    .rejectLocalhost(false)
                     .build())
-            .name("my-bitbucket-account")
+            .name("my-github-account")
             .build();
     GitHubArtifactCredentials credentials =
         new GitHubArtifactCredentials(account, okHttpClient, objectMapper);
+    prepareServer(server, mapping -> mapping);
+
+    assertThat(
+            credentials.download(
+                Artifact.builder()
+                    .reference(server.baseUrl() + METADATA_PATH)
+                    .version("master")
+                    .type("github/file")
+                    .build()))
+        .hasSameContentAs(new ByteArrayInputStream(FILE_CONTENTS.getBytes(Charsets.UTF_8)));
+
     Artifact artifact =
         Artifact.builder()
             .reference("http://example.com")
             .version("master")
             .type("github/file")
             .build();
-    assertThat(
-            credentials.download(
-                Artifact.builder()
-                    .reference(
-                        "https://www.http-response.com/json?body={%22download_url%22:%22https://jsonplaceholder.typicode.com/posts/1%22}")
-                    .build()))
-        .isNotNull();
     Assertions.assertThrows(IllegalArgumentException.class, () -> credentials.download(artifact));
   }
 
