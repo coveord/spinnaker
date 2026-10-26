@@ -30,6 +30,7 @@ import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Primary
 import org.springframework.stereotype.Component
 import io.reactivex.rxjava3.core.Observable
+import java.util.function.Consumer
 import javax.annotation.Nonnull
 
 /**
@@ -114,6 +115,16 @@ class DualExecutionRepository(
 
   override fun storeStage(stage: StageExecution) {
     select(stage.execution).storeStage(stage)
+  }
+
+  override fun updateStageIfStatus(
+    type: ExecutionType,
+    executionId: String,
+    stageId: String,
+    expected: Set<ExecutionStatus>,
+    updater: Consumer<StageExecution>
+  ) {
+    select(type, executionId).updateStageIfStatus(type, executionId, stageId, expected, updater)
   }
 
   override fun updateStageContext(stage: StageExecution) {

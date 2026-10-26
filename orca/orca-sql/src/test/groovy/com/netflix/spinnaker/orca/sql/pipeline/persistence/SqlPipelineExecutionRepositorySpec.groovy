@@ -44,10 +44,12 @@ import spock.lang.Subject
 import spock.lang.Unroll
 
 import javax.sql.DataSource
+import java.util.function.Consumer
 
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.cleanupDb
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.initDualTcMysqlDatabases
 import static com.netflix.spinnaker.kork.sql.test.SqlTestUtil.initDualTcPostgresDatabases
+import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.NOT_STARTED
 import static com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType.PIPELINE
 import static com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.BUILD_TIME_ASC
 import static com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.BUILD_TIME_DESC
@@ -206,6 +208,12 @@ abstract class SqlPipelineExecutionRepositorySpec extends PipelineExecutionRepos
     StageExecution stage = e.stages.find()
     stage.context.putAll([skipRemainingWait: true])
     repo.storeStage(stage)
+
+    then:
+    thrown(ForeignExecutionException)
+
+    when:
+    repo.updateStageIfStatus(PIPELINE, e.id, stage.id, [NOT_STARTED] as Set, { } as Consumer<StageExecution>)
 
     then:
     thrown(ForeignExecutionException)
