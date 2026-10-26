@@ -106,7 +106,7 @@ class SqlStorageService(
           .select(
             field("body", String::class.java),
             field("created_at", Long::class.java),
-            field("last_modified_at", Long::class.java),
+            field("last_modified_at", Long::class.java)
           )
           .from(definitionsByType[objectType]!!.tableName)
           .where(
