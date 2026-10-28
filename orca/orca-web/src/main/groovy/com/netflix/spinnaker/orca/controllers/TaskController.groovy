@@ -27,6 +27,7 @@ import com.netflix.spinnaker.config.TaskControllerConfigurationProperties
 import com.netflix.spinnaker.kork.retrofit.Retrofit2SyncCall
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerHttpException
 import com.netflix.spinnaker.kork.web.exceptions.NotFoundException
+import com.netflix.spinnaker.orca.Pes4014RaceHooks
 import com.netflix.spinnaker.orca.api.pipeline.graph.StageDefinitionBuilder
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
@@ -625,19 +626,24 @@ class TaskController {
   PipelineExecution updatePipelineStage(
     @PathVariable String id,
     @PathVariable String stageId, @RequestBody Map context) {
-    return executionOperator.updateStage(PIPELINE, id, stageId,
-        { stage ->
-          stage.context.putAll(context)
-          validateStageUpdate(stage)
-          stage.lastModified = new StageExecution.LastModifiedDetails(
-              user: AuthenticatedRequest.getSpinnakerUser().orElse("anonymous"),
-              allowedAccounts: AuthenticatedRequest.getSpinnakerAccounts().orElse(null)?.split(",") ?: [],
-              lastModifiedTime: System.currentTimeMillis()
-          )
+    try {
+      return executionOperator.updateStage(PIPELINE, id, stageId,
+          { stage ->
+            Pes4014RaceHooks.afterPatchRead(stage, context)
+            stage.context.putAll(context)
+            validateStageUpdate(stage)
+            stage.lastModified = new StageExecution.LastModifiedDetails(
+                user: AuthenticatedRequest.getSpinnakerUser().orElse("anonymous"),
+                allowedAccounts: AuthenticatedRequest.getSpinnakerAccounts().orElse(null)?.split(",") ?: [],
+                lastModifiedTime: System.currentTimeMillis()
+            )
 
-          // `lastModifiedBy` is deprecated (pending a update to deck)
-          stage.context["lastModifiedBy"] = stage.lastModified.user
-        })
+            // `lastModifiedBy` is deprecated (pending a update to deck)
+            stage.context["lastModifiedBy"] = stage.lastModified.user
+          })
+    } finally {
+      Pes4014RaceHooks.afterPatchWrite(stageId, context)
+    }
   }
 
   // If other execution mutations need validation, factor this out.

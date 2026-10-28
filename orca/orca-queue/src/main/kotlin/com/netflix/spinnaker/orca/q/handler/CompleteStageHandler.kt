@@ -18,6 +18,7 @@ package com.netflix.spinnaker.orca.q.handler
 
 import com.netflix.spectator.api.Registry
 import com.netflix.spectator.api.histogram.PercentileTimer
+import com.netflix.spinnaker.orca.Pes4014RaceHooks
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.CANCELED
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus.FAILED_CONTINUE
@@ -149,7 +150,9 @@ class CompleteStageHandler(
         }
 
         stage.includeExpressionEvaluationSummary()
+        Pes4014RaceHooks.beforeCompletionWrite(stage)
         repository.storeStage(stage)
+        Pes4014RaceHooks.afterCompletionWrite(stage)
 
         // When a synthetic stage ends with FAILED_CONTINUE, propagate that status up to the stage's
         // parent so that no more of the parent's synthetic children will run.
