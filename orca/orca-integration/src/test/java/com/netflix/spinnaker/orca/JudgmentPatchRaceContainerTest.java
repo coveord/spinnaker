@@ -88,8 +88,17 @@ public class JudgmentPatchRaceContainerTest extends BaseContainerTest {
     String executionId = startPipeline();
     String stageId =
         (String)
-            awaitJudgment(executionId, judgment -> "RUNNING".equals(judgment.get("status")))
+            awaitJudgment(
+                    executionId,
+                    "the judgment task running",
+                    judgment ->
+                        tasksOf(judgment).stream()
+                            .allMatch(task -> "RUNNING".equals(task.get("status"))))
                 .get("id");
+    // The task's first run follows its start and the next one comes 15 s later
+    // (WaitForManualJudgmentTask.backoffPeriod). RunTask stores the stage it read before running,
+    // so an approval stored during a run is overwritten: approve between two runs.
+    Thread.sleep(3000);
 
     HttpResponse<String> approval =
         patchStage(
@@ -98,6 +107,7 @@ public class JudgmentPatchRaceContainerTest extends BaseContainerTest {
 
     awaitJudgment(
         executionId,
+        "the approval stored and the judgment task SUCCEEDED, with the stage still RUNNING",
         judgment ->
             "RUNNING".equals(judgment.get("status"))
                 && tasksOf(judgment).stream()
@@ -198,16 +208,15 @@ public class JudgmentPatchRaceContainerTest extends BaseContainerTest {
   }
 
   private Map<String, Object> awaitJudgment(
-      String executionId, Predicate<Map<String, Object>> condition) throws Exception {
+      String executionId, String expectation, Predicate<Map<String, Object>> condition)
+      throws Exception {
     Instant deadline = Instant.now().plus(STAGE_TIMEOUT);
     while (true) {
       Map<String, Object> judgment = judgmentOf(getExecution(executionId));
       if (judgment != null && condition.test(judgment)) {
         return judgment;
       }
-      assertThat(Instant.now())
-          .as("judgment stage never reached the expected state: %s", judgment)
-          .isBefore(deadline);
+      assertThat(Instant.now()).as("never saw %s: %s", expectation, judgment).isBefore(deadline);
       Thread.sleep(100);
     }
   }
