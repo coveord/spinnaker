@@ -21,6 +21,7 @@ import com.netflix.spinnaker.config.CompressionType
 import com.netflix.spinnaker.config.ExecutionCompressionProperties
 import com.netflix.spinnaker.kork.sql.config.RetryProperties
 import com.netflix.spinnaker.kork.sql.test.SqlTestUtil
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
 import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution
 import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution
@@ -32,6 +33,7 @@ import com.netflix.spinnaker.orca.pipeline.model.PipelineTrigger
 import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.model.support.TriggerDeserializer
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionNotFoundException
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotUpdatableException
 import com.netflix.spinnaker.orca.sql.PipelineRefTriggerDeserializerSupplier
 import org.mockito.kotlin.atLeastOnce
 import org.mockito.kotlin.doReturn
@@ -46,6 +48,10 @@ import org.jooq.impl.DSL.field
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.testcontainers.DockerClientFactory
 import java.lang.System.currentTimeMillis
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import org.springframework.jdbc.datasource.lookup.AbstractRoutingDataSource
 import javax.sql.DataSource
 import io.reactivex.rxjava3.core.Observable
@@ -578,6 +584,96 @@ class SqlExecutionRepositoryTest : JUnit5Minutests {
         assertThat(actualPipelineExecution).isEqualTo(pipelineExecution)
       }
     }
+    context("conditional stage update") {
+      val notComplete = ExecutionStatus.values().filterNot { it.isComplete }.toSet()
+
+      fun storeRunningJudgment(repository: SqlExecutionRepository): PipelineExecution =
+        PipelineExecutionImpl(ExecutionType.PIPELINE, "test-application").apply {
+          status = ExecutionStatus.RUNNING
+          stage {
+            type = "manualJudgment"
+            status = ExecutionStatus.RUNNING
+          }
+        }.also { repository.store(it) }
+
+      fun storedStage(repository: SqlExecutionRepository, execution: PipelineExecution): StageExecution =
+        repository.retrieve(ExecutionType.PIPELINE, execution.id).stages.single()
+
+      fun approve(repository: SqlExecutionRepository, execution: PipelineExecution, then: () -> Unit = {}) =
+        repository.updateStageIfStatus(ExecutionType.PIPELINE, execution.id, execution.stages.single().id, notComplete) { stage ->
+          stage.context["judgmentStatus"] = "continue"
+          then()
+        }
+
+      test("refuses to update a stage that another writer completed") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val completingCopy = storedStage(repository, execution)
+        completingCopy.status = ExecutionStatus.SUCCEEDED
+        repository.storeStage(completingCopy)
+
+        assertThatThrownBy { approve(repository, execution) }
+          .isInstanceOf(StageNotUpdatableException::class.java)
+          .hasMessage("Stage ${completingCopy.id} is SUCCEEDED; completed stages cannot be updated")
+        assertThat(storedStage(repository, execution).status).isEqualTo(ExecutionStatus.SUCCEEDED)
+        assertThat(storedStage(repository, execution).context).doesNotContainKey("judgmentStatus")
+      }
+
+      test("updates the latest stored copy of a running stage") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val concurrentCopy = storedStage(repository, execution)
+        concurrentCopy.context["writtenConcurrently"] = true
+        repository.storeStage(concurrentCopy)
+
+        approve(repository, execution)
+
+        assertThat(storedStage(repository, execution).status).isEqualTo(ExecutionStatus.RUNNING)
+        assertThat(storedStage(repository, execution).context)
+          .containsEntry("judgmentStatus", "continue")
+          .containsEntry("writtenConcurrently", true)
+      }
+
+      test("makes a concurrent stage write wait until the update commits") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val completingCopy = storedStage(repository, execution)
+        completingCopy.status = ExecutionStatus.SUCCEEDED
+        val updaterEntered = CountDownLatch(1)
+        val releaseUpdater = CountDownLatch(1)
+        val writers = Executors.newFixedThreadPool(2)
+        try {
+          val update = writers.submit {
+            approve(repository, execution) {
+              updaterEntered.countDown()
+              releaseUpdater.await(30, TimeUnit.SECONDS)
+            }
+          }
+          assertThat(updaterEntered.await(30, TimeUnit.SECONDS)).isTrue()
+
+          val completingWrite = writers.submit { repository.storeStage(completingCopy) }
+
+          assertThatThrownBy { completingWrite.get(2, TimeUnit.SECONDS) }.isInstanceOf(TimeoutException::class.java)
+          releaseUpdater.countDown()
+          update.get(30, TimeUnit.SECONDS)
+          completingWrite.get(30, TimeUnit.SECONDS)
+        } finally {
+          releaseUpdater.countDown()
+          writers.shutdownNow()
+        }
+        assertThat(storedStage(repository, execution).status).isEqualTo(ExecutionStatus.SUCCEEDED)
+      }
+
+      test("propagates the updater's failure without writing") {
+        val repository = sqlExecutionRepositoryNoCompression
+        val execution = storeRunningJudgment(repository)
+        val updaterFailure = IllegalStateException("cannot update this stage")
+
+        assertThatThrownBy { approve(repository, execution) { throw updaterFailure } }.isSameAs(updaterFailure)
+        assertThat(storedStage(repository, execution).context).doesNotContainKey("judgmentStatus")
+      }
+    }
+
     context("read pool usage") {
       val mockedDslContext = mock<DSLContext>()
       val mockedObjectMapper = mock<ObjectMapper>()

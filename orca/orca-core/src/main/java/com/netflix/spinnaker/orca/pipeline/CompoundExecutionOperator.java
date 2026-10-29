@@ -17,6 +17,7 @@
 package com.netflix.spinnaker.orca.pipeline;
 
 import com.netflix.spinnaker.kork.core.RetrySupport;
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus;
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType;
 import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution;
 import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution;
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import javax.annotation.Nonnull;
@@ -109,6 +111,31 @@ public class CompoundExecutionOperator {
         };
     return doInternalWithLocking(
         runner::reschedule, repositoryAction, "reschedule", executionType, executionId, stageId);
+  }
+
+  /**
+   * Updates the stage like {@link #updateStage}, but only while its stored status is in {@code
+   * expected}, and lets failures reach the caller instead of logging them.
+   */
+  public PipelineExecution updateStageIfStatus(
+      @Nonnull ExecutionType executionType,
+      @Nonnull String executionId,
+      @Nonnull String stageId,
+      @Nonnull Set<ExecutionStatus> expected,
+      @Nonnull Consumer<StageExecution> stageUpdater) {
+    repository.updateStageIfStatus(executionType, executionId, stageId, expected, stageUpdater);
+    PipelineExecution execution =
+        runWithRetries(() -> repository.retrieve(executionType, executionId));
+    try {
+      runner.reschedule(execution);
+    } catch (RuntimeException rescheduleFailure) {
+      log.warn(
+          "Updated stage {} but failed to reschedule execution {}",
+          stageId,
+          executionId,
+          rescheduleFailure);
+    }
+    return execution;
   }
 
   public PipelineExecution restartStage(@Nonnull String executionId, @Nonnull String stageId) {

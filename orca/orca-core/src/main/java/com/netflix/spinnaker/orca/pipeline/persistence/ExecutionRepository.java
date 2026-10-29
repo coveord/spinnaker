@@ -25,6 +25,7 @@ import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution;
 import io.reactivex.rxjava3.core.Observable;
 import java.time.Instant;
 import java.util.*;
+import java.util.function.Consumer;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
@@ -32,6 +33,25 @@ public interface ExecutionRepository {
   void store(@Nonnull PipelineExecution execution);
 
   void storeStage(@Nonnull StageExecution stage);
+
+  /**
+   * Applies {@code updater} to the stored stage and stores it, or throws {@link
+   * StageNotUpdatableException} when the stored status is not in {@code expected}. Implementations
+   * should make the check and the write atomic; this default does not.
+   */
+  default void updateStageIfStatus(
+      @Nonnull ExecutionType type,
+      @Nonnull String executionId,
+      @Nonnull String stageId,
+      @Nonnull Set<ExecutionStatus> expected,
+      @Nonnull Consumer<StageExecution> updater) {
+    StageExecution stage = retrieve(type, executionId).stageById(stageId);
+    if (!expected.contains(stage.getStatus())) {
+      throw new StageNotUpdatableException(stageId, stage.getStatus());
+    }
+    updater.accept(stage);
+    storeStage(stage);
+  }
 
   void updateStageContext(@Nonnull StageExecution stage);
 

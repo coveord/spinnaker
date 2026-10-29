@@ -23,6 +23,7 @@ import com.netflix.spinnaker.config.TaskControllerConfigurationProperties
 import com.netflix.spinnaker.kork.artifacts.model.Artifact
 import com.netflix.spinnaker.kork.retrofit.exceptions.SpinnakerHttpException
 import com.netflix.spinnaker.orca.api.pipeline.graph.StageDefinitionBuilder
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
 import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
 import com.netflix.spinnaker.orca.front50.Front50Service
 import com.netflix.spinnaker.orca.jackson.OrcaObjectMapper
@@ -359,6 +360,7 @@ class TaskControllerSpec extends Specification {
     def pipelineStage = new StageExecutionImpl(pipeline, "test", [value: "1"])
     pipelineStage.id = "s1"
     pipeline.stages.add(pipelineStage)
+    def notCompleteStatuses = ExecutionStatus.values().findAll { status -> !status.complete } as Set
 
     when:
     mockMvc.perform(patch("/pipelines/$pipeline.id/stages/s1").content(
@@ -366,7 +368,7 @@ class TaskControllerSpec extends Specification {
     ).contentType(MediaType.APPLICATION_JSON)).andReturn().response
 
     then:
-    1 * executionOperator.updateStage(pipeline.type, pipeline.id, pipelineStage.id, _)
+    1 * executionOperator.updateStageIfStatus(pipeline.type, pipeline.id, pipelineStage.id, notCompleteStatuses, _)
   }
 
   void '/applications/{application}/pipelines/search should return pipelines of all types if triggerTypes if not provided'() {

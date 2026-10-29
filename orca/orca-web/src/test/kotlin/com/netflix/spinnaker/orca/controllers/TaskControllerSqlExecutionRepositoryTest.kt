@@ -20,11 +20,22 @@ import com.fasterxml.jackson.core.type.TypeReference
 import com.netflix.spectator.api.NoopRegistry
 import com.netflix.spinnaker.config.ExecutionCompressionProperties
 import com.netflix.spinnaker.config.TaskControllerConfigurationProperties
+import com.netflix.spinnaker.kork.core.RetrySupport
 import com.netflix.spinnaker.kork.sql.config.RetryProperties
 import com.netflix.spinnaker.kork.sql.test.SqlTestUtil
+import com.netflix.spinnaker.kork.web.exceptions.ExceptionMessageDecorator
+import com.netflix.spinnaker.kork.web.exceptions.GenericExceptionHandlers
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionStatus
+import com.netflix.spinnaker.orca.api.pipeline.models.ExecutionType
 import com.netflix.spinnaker.orca.api.pipeline.models.PipelineExecution
+import com.netflix.spinnaker.orca.api.pipeline.models.StageExecution
 import com.netflix.spinnaker.orca.front50.Front50Service
 import com.netflix.spinnaker.orca.jackson.OrcaObjectMapper
+import com.netflix.spinnaker.orca.lock.NoOpRunOnLockAcquired
+import com.netflix.spinnaker.orca.lock.RetriableLock
+import com.netflix.spinnaker.orca.pipeline.CompoundExecutionOperator
+import com.netflix.spinnaker.orca.pipeline.model.PipelineExecutionImpl
+import com.netflix.spinnaker.orca.pipeline.model.StageExecutionImpl
 import com.netflix.spinnaker.orca.pipeline.util.ContextParameterProcessor
 import com.netflix.spinnaker.orca.sql.pipeline.persistence.SqlExecutionRepository
 import org.mockito.kotlin.mock
@@ -36,8 +47,11 @@ import org.jooq.exception.DataAccessException
 import org.jooq.impl.DSL.field
 import org.jooq.impl.DSL.table
 import org.mockito.Mockito
+import org.springframework.http.MediaType
+import org.springframework.mock.web.MockHttpServletResponse
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
 import retrofit2.mock.Calls
 import strikt.api.expectCatching
@@ -77,7 +91,7 @@ class TaskControllerSqlExecutionRepositoryTest : JUnit5Minutests {
       front50Service,
       executionRepository,
       mock(),
-      mock(),
+      CompoundExecutionOperator(executionRepository, mock(), RetrySupport(), RetriableLock(NoOpRunOnLockAcquired(), RetrySupport())),
       listOf(mock()),
       ContextParameterProcessor(),
       mock(),
@@ -88,6 +102,27 @@ class TaskControllerSqlExecutionRepositoryTest : JUnit5Minutests {
     )
 
     val subject: MockMvc = MockMvcBuilders.standaloneSetup(taskController).build()
+
+    val stageUpdateSubject: MockMvc = MockMvcBuilders.standaloneSetup(taskController)
+      .setControllerAdvice(GenericExceptionHandlers(ExceptionMessageDecorator(mock())))
+      .build()
+
+    fun storeJudgmentPipeline(stageStatus: ExecutionStatus): PipelineExecution =
+      PipelineExecutionImpl(ExecutionType.PIPELINE, "test-app").also { execution ->
+        execution.status = ExecutionStatus.RUNNING
+        execution.stages.add(StageExecutionImpl(execution, "manualJudgment", mutableMapOf<String, Any>()).apply { status = stageStatus })
+        executionRepository.store(execution)
+      }
+
+    fun storedStage(execution: PipelineExecution): StageExecution =
+      executionRepository.retrieve(ExecutionType.PIPELINE, execution.id).stages.single()
+
+    fun patchStage(executionId: String, stageId: String, context: Map<String, Any>): MockHttpServletResponse =
+      stageUpdateSubject.perform(
+        patch("/pipelines/$executionId/stages/$stageId")
+          .contentType(MediaType.APPLICATION_JSON)
+          .content(OrcaObjectMapper.getInstance().writeValueAsString(context))
+      ).andReturn().response
 
     fun setupDefaultData() {
       setupDefaultDbData()
@@ -215,6 +250,44 @@ class TaskControllerSqlExecutionRepositoryTest : JUnit5Minutests {
       }
 
       testExecutionRetrieval(optimizedDescription(true))
+    }
+
+    context("stage update") {
+      fixture {
+        Fixture(false)
+      }
+
+      after { cleanUp() }
+
+      test("refuses to update a completed stage with 409 and leaves it unchanged") {
+        val execution = storeJudgmentPipeline(ExecutionStatus.SUCCEEDED)
+        val stageId = execution.stages.single().id
+
+        val response = patchStage(execution.id, stageId, mapOf("judgmentStatus" to "continue"))
+
+        assertThat(response.status).isEqualTo(409)
+        assertThat(response.errorMessage).isEqualTo("Stage $stageId is SUCCEEDED; completed stages cannot be updated")
+        assertThat(storedStage(execution).context).doesNotContainKey("judgmentStatus")
+      }
+
+      test("updates a running judgment stage") {
+        val execution = storeJudgmentPipeline(ExecutionStatus.RUNNING)
+
+        val response = patchStage(execution.id, execution.stages.single().id, mapOf("judgmentStatus" to "continue"))
+
+        assertThat(response.status).isEqualTo(200)
+        assertThat(storedStage(execution).status).isEqualTo(ExecutionStatus.RUNNING)
+        assertThat(storedStage(execution).context).containsEntry("judgmentStatus", "continue")
+      }
+
+      test("refuses a manual skip of a stage that does not allow it with 405") {
+        val execution = storeJudgmentPipeline(ExecutionStatus.RUNNING)
+
+        val response = patchStage(execution.id, execution.stages.single().id, mapOf("manualSkip" to true))
+
+        assertThat(response.status).isEqualTo(405)
+        assertThat(storedStage(execution).context).doesNotContainKey("manualSkip")
+      }
     }
 
     context("test query having explicit query timeouts") {

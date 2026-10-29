@@ -52,6 +52,7 @@ import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.Execu
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.NATURAL_ASC
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionComparator.START_TIME_OR_ID
 import com.netflix.spinnaker.orca.pipeline.persistence.ExecutionRepository.ExecutionCriteria
+import com.netflix.spinnaker.orca.pipeline.persistence.StageNotUpdatableException
 import com.netflix.spinnaker.orca.pipeline.persistence.UnpausablePipelineException
 import com.netflix.spinnaker.orca.pipeline.persistence.UnresumablePipelineException
 import de.huxhorn.sulky.ulid.SpinULID
@@ -84,6 +85,7 @@ import java.io.ByteArrayOutputStream
 import java.lang.System.currentTimeMillis
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.util.function.Consumer
 import java.util.stream.Collectors.toList
 import javax.sql.DataSource
 import kotlin.collections.Collection
@@ -183,6 +185,37 @@ class SqlExecutionRepository(
     doForeignAware(PatchStageInterlinkEvent(stage.execution.type, stage.execution.id, stage.id, mapper.writeValueAsString(stage))) {
       _, dslContext ->
       jooq.transactional { storeStageInternal(dslContext, stage) }
+    }
+  }
+
+  /** Locks the stage row first, so no other writer can change the stage between the status check and the write. */
+  override fun updateStageIfStatus(
+    type: ExecutionType,
+    executionId: String,
+    stageId: String,
+    expected: Set<ExecutionStatus>,
+    updater: Consumer<StageExecution>
+  ) {
+    withPool(poolName) {
+      // Not [transactional]: it would retry the refusal and the updater's own failures.
+      jooq.transaction { configuration ->
+        val ctx = DSL.using(configuration)
+        ctx.select(field("id"))
+          .from(type.stagesTableName)
+          .where(stageId.toWhereCondition())
+          .forUpdate()
+          .execute()
+
+        val execution = selectExecution(ctx, type, executionId)
+          ?: throw ExecutionNotFoundException("No $type found for $executionId")
+        isForeign(execution, shouldThrow = true)
+        val stage = execution.stageById(stageId)
+        if (stage.status !in expected) {
+          throw StageNotUpdatableException(stageId, stage.status)
+        }
+        updater.accept(stage)
+        storeStageInternal(ctx, stage)
+      }
     }
   }
 
